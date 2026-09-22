@@ -15,6 +15,10 @@ const state = {
   expanded: new Set(),  // pids whose explanation is open
   cmdlines: new Map(),  // pid -> argv, fetched once
   tab: "apps",          // "apps" | "perf"
+  query: "",            // list filter text
+  sort: "cpu",          // "cpu" | "mem" | "name"
+  heldOrder: null,      // app ids, frozen while the pointer is in the list
+  heldLayout: null,     // tile rectangles, frozen while the pointer is in the map
   span: 0,              // seconds of history shown; 0 means the live buffer
   history: [],          // machine series for the current span
   live: [],             // rolling per-second buffer, newest last
@@ -225,7 +229,20 @@ function renderMap(m) {
 
   renderCrumbs(app);
 
-  const laid = squarify(items, rect.width, rect.height);
+  // Holding the layout still while the pointer is over it is the difference
+  // between a picture you can click and one that squirms away. Sizes are
+  // recomputed every second, so without this the block being aimed at has
+  // moved by the time the click lands. Values keep updating; only the
+  // geometry is pinned.
+  let laid;
+  if (state.heldLayout) {
+    const frozen = new Map(state.heldLayout.map((t) => [t.id, t]));
+    laid = items
+      .filter((it) => frozen.has(it.id))
+      .map((it) => ({ ...it, ...pick(frozen.get(it.id), ["x", "y", "w", "h"]) }));
+  } else {
+    laid = squarify(items, rect.width, rect.height);
+  }
   const seen = new Set();
 
   for (const t of laid) {
@@ -294,6 +311,23 @@ function renderCrumbs(app) {
 function drillOut() {
   if (!state.drilledApp) return;
   state.drilledApp = null;
+  state.heldLayout = null;
+  if (state.model) renderMap(state.model);
+}
+
+const pick = (obj, keys) => Object.fromEntries(keys.map((k) => [k, obj[k]]));
+
+function holdLayout() {
+  if (!state.model || state.heldLayout) return;
+  const host = $("map");
+  const rect = host.getBoundingClientRect();
+  const { items } = mapItems(state.model);
+  state.heldLayout = squarify(items, rect.width, rect.height);
+}
+
+function releaseLayout() {
+  if (!state.heldLayout) return;
+  state.heldLayout = null;
   if (state.model) renderMap(state.model);
 }
 
@@ -332,14 +366,56 @@ function renderLegend(app) {
    Application list
    ================================================================== */
 
+/* Orders the list, holding it still when someone is trying to click it.
+ *
+ * Sorting by processor use means the rows resequence every second, so the row
+ * you are reaching for slides out from under the cursor. While the pointer is
+ * in the list the previous order is reused and only the numbers change. */
+function orderedApps(m) {
+  const q = state.query.trim().toLowerCase();
+  let apps = m.apps;
+  if (q) {
+    apps = apps.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) ||
+        a.id.toLowerCase().includes(q) ||
+        a.windows.some((w) => w.toLowerCase().includes(q)),
+    );
+  }
+
+  if (state.heldOrder) {
+    const rank = new Map(state.heldOrder.map((id, i) => [id, i]));
+    // Anything that appeared while the order was held goes to the end rather
+    // than pushing the existing rows around.
+    return [...apps].sort(
+      (a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity),
+    );
+  }
+
+  const by = {
+    cpu: (a, b) => b.totals.cpu_cores - a.totals.cpu_cores,
+    mem: (a, b) => b.totals.mem_pss - a.totals.mem_pss,
+    name: (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+  }[state.sort];
+
+  return [...apps].sort(by);
+}
+
 function renderList(m) {
   const host = $("list");
-  // Kernel threads are included here as the single grouped row the model
-  // produces. Their CPU time is real, and hiding it in the list while the
-  // treemap shows it would make the two views disagree.
-  const apps = m.apps.slice(0, 60);
-  host.innerHTML = "";
+  const apps = orderedApps(m).slice(0, 80);
 
+  $("list-hint").hidden = !state.heldOrder;
+  if (state.heldOrder) {
+    $("list-hint").textContent = "Order held while you are in the list — values are still live.";
+  }
+
+  if (!apps.length) {
+    host.innerHTML = `<div class="list-empty">Nothing matches “${escapeHtml(state.query)}”.</div>`;
+    return;
+  }
+
+  host.innerHTML = "";
   for (const a of apps) {
     const row = document.createElement("div");
     row.className = "row";
@@ -357,7 +433,7 @@ function renderList(m) {
         </div>
       </div>
       <div class="row-num num"><strong>${fmtPct(cpuPct(a.totals))}</strong>%</div>
-      <div class="row-num num">${est}${bytesText(a.totals.mem_pss)}</div>
+      <div class="row-num num">${a.totals.mem_pss > 0 ? est + bytesText(a.totals.mem_pss) : "—"}</div>
       <div class="row-procs num">${a.process_count} proc${a.process_count === 1 ? "" : "s"}</div>`;
 
     row.querySelector(".row-dot").style.background = colorForKind(a.kind);
@@ -755,7 +831,11 @@ function renderPerf() {
         points: at((r) => [r.t, r.txKb], (r) => [r.t, r.net_tx_kbps]),
       },
     ],
-    yFormat: (v) => (v >= 1024 ? `${(v / 1024).toFixed(1)} MB/s` : `${Math.round(v)} KB/s`),
+    // One unit for the whole axis, chosen from its top value.
+    yFormat: (v, max) =>
+      (max ?? v) >= 1024
+        ? `${(v / 1024).toFixed(1)} MB/s`
+        : `${Math.round(v)} KB/s`,
     height: 168,
     yMin: 64,
     empty,
@@ -1092,6 +1172,12 @@ function savePrefs(p) {
   }
 }
 
+function releaseOrder() {
+  if (!state.heldOrder) return;
+  state.heldOrder = null;
+  if (state.model) renderList(state.model);
+}
+
 function applyAppearance(prefs) {
   const root = document.documentElement;
   if (prefs.translucent) root.dataset.translucent = "true";
@@ -1104,6 +1190,11 @@ function applyAppearance(prefs) {
   $("toggle-theme").setAttribute("aria-pressed", String(prefs.theme === "light"));
   $("toggle-theme").textContent = prefs.theme === "light" ? "Dark" : "Light";
 
+  const side = prefs.layout === "side";
+  $("view-apps").dataset.layout = side ? "side" : "stacked";
+  $("toggle-layout").setAttribute("aria-pressed", String(side));
+  $("toggle-layout").textContent = side ? "Stacked" : "Side by side";
+
   // Tiles cache no colour, but the map reads its hues from CSS at paint
   // time, so it has to be redrawn when the palette underneath changes.
   if (state.tab === "perf") renderPerf();
@@ -1115,6 +1206,7 @@ function applyAppearance(prefs) {
 
 function setMetric(metric) {
   state.metric = metric;
+  state.heldLayout = null;
   $("metric-cpu").setAttribute("aria-pressed", String(metric === "cpu"));
   $("metric-mem").setAttribute("aria-pressed", String(metric === "mem"));
   if (state.model) renderMap(state.model);
@@ -1196,6 +1288,47 @@ function wire() {
     b.onclick = () => setSpan(Number(b.dataset.span));
   }
 
+  // Filtering and sorting -------------------------------------------
+  const search = $("list-search");
+  search.addEventListener("input", () => {
+    state.query = search.value;
+    if (state.model) renderList(state.model);
+    $("list").scrollTop = 0;
+  });
+  // A held order while typing would be actively unhelpful: the filter is
+  // meant to resequence the list.
+  search.addEventListener("focus", () => releaseOrder());
+
+  for (const b of document.querySelectorAll("[data-sort]")) {
+    b.onclick = () => {
+      state.sort = b.dataset.sort;
+      for (const other of document.querySelectorAll("[data-sort]")) {
+        other.setAttribute("aria-pressed", String(other === b));
+      }
+      const p = loadPrefs();
+      p.sort = state.sort;
+      savePrefs(p);
+      releaseOrder();
+      if (state.model) renderList(state.model);
+      $("list").scrollTop = 0;
+    };
+  }
+
+  const list = $("list");
+  list.addEventListener("pointerenter", () => {
+    if (state.sort === "name" || !state.model) return;
+    state.heldOrder = orderedApps(state.model).map((a) => a.id);
+    renderList(state.model);
+  });
+  list.addEventListener("pointerleave", () => releaseOrder());
+
+  $("toggle-layout").onclick = () => {
+    const p = loadPrefs();
+    p.layout = p.layout === "side" ? "stacked" : "side";
+    savePrefs(p);
+    applyAppearance(p);
+  };
+
   $("toggle-translucent").onclick = () => {
     const p = loadPrefs();
     p.translucent = !p.translucent;
@@ -1219,10 +1352,17 @@ function wire() {
     const t = tileEl._tile;
     if (t.isOther) return;
     if (t.app) {
+      state.heldLayout = null;
       state.drilledApp = t.app.id;
       openDetail(t.app.id);
       renderMap(state.model);
     }
+  });
+
+  map.addEventListener("pointerenter", holdLayout);
+  map.addEventListener("pointerleave", () => {
+    hideTip();
+    releaseLayout();
   });
 
   map.addEventListener("mousemove", (ev) => {
@@ -1242,6 +1382,8 @@ function wire() {
   window.addEventListener("resize", () => {
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(() => {
+      // A resize invalidates any pinned geometry.
+      state.heldLayout = null;
       if (state.tab === "perf") renderPerf();
       else if (state.model) renderMap(state.model);
     });
@@ -1274,6 +1416,12 @@ async function start() {
   // Come back to whichever view was last open. Done after the live wiring, so
   // the history path can never hold up the live path.
   if (prefs.span) state.span = prefs.span;
+  if (prefs.sort) {
+    state.sort = prefs.sort;
+    for (const b of document.querySelectorAll("[data-sort]")) {
+      b.setAttribute("aria-pressed", String(b.dataset.sort === state.sort));
+    }
+  }
   setSpan(state.span);
   if (prefs.tab === "perf") setTab("perf", false);
 

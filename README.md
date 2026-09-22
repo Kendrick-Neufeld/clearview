@@ -65,6 +65,22 @@ cargo build --release
 | Network, machine-wide | `/proc/net/dev` | counts everything |
 | Network, per app | `ss`, per-socket TCP counters | **TCP only** — UDP keeps no such counter, so QUIC is invisible and per-app sums read lower than the total |
 
+## Reading a list that will not sit still
+
+Sorting by processor use means the rows resequence every second, so the row you
+are reaching for slides out from under the cursor — and the treemap does the
+same thing with its blocks. Both hold their arrangement while the pointer is
+inside them: the numbers keep updating, the geometry does not move. Filtering by
+name and sorting by memory or name are there for when you know what you are
+looking for.
+
+## Two layouts
+
+Stacked puts the blocks above the list, which suits a wide screen. Side by side
+puts the list on the left and the blocks on the right, which suits a portrait
+one — or simply reading preference. Below 760px wide the stacked arrangement is
+used regardless, because two columns that narrow serve neither.
+
 ## The two kinds of graph
 
 They answer different questions, and neither can answer the other's:

@@ -50,6 +50,8 @@
                   title="See your desktop through the window">Transparent</button>
           <button class="toggle" id="toggle-theme" aria-pressed="false"
                   title="Switch to the light theme">Light</button>
+          <button class="toggle" id="toggle-layout" aria-pressed="false"
+                  title="Put the list beside the blocks instead of above them">Side by side</button>
         </div>
       </div>
     </header>
@@ -88,8 +90,17 @@
     <section class="list-section">
       <div class="section-head" style="margin-top:var(--s-2)">
         <span class="section-title">Applications</span>
-        <span class="section-note">Grouped properly — one row per app, not per process</span>
+        <div class="list-tools">
+          <input class="search" id="list-search" type="search" spellcheck="false"
+                 placeholder="Filter by name…" aria-label="Filter applications by name" />
+          <div class="controls" role="group" aria-label="Sort by">
+            <button class="toggle" data-sort="cpu" aria-pressed="true">Processor</button>
+            <button class="toggle" data-sort="mem" aria-pressed="false">Memory</button>
+            <button class="toggle" data-sort="name" aria-pressed="false">Name</button>
+          </div>
+        </div>
       </div>
+      <div class="list-hint" id="list-hint" hidden></div>
       <div class="list-scroll" id="list"></div>
     </section>
     </div>

@@ -69,7 +69,7 @@ export function drawChart(host, opts) {
     const gy = y(v).toFixed(1);
     parts.push(
       `<line class="grid" x1="${PAD.left}" y1="${gy}" x2="${PAD.left + w}" y2="${gy}"/>`,
-      `<text class="tick" x="${PAD.left - 8}" y="${gy}" text-anchor="end" dominant-baseline="middle">${yFormat(v)}</text>`,
+      `<text class="tick" x="${PAD.left - 8}" y="${gy}" text-anchor="end" dominant-baseline="middle">${yFormat(v, yMax)}</text>`,
     );
   }
 
@@ -163,7 +163,7 @@ function attachHover(host, ctx) {
       .map((s) => {
         const near = nearest(s.points, t);
         if (!near) return "";
-        return `<div class="tip-row"><span class="tip-key" style="background:${s.color}"></span>${s.name} — ${ctx.yFormat(near[1], true)}</div>`;
+        return `<div class="tip-row"><span class="tip-key" style="background:${s.color}"></span>${s.name} — ${ctx.yFormat(near[1], near[1])}</div>`;
       })
       .join("");
 

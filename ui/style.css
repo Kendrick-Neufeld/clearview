@@ -179,9 +179,19 @@ body {
   min-width: 0;
 }
 
-.view-controls { flex: none; text-align: right; }
+/* Three buttons will not sit on one line next to four stats; let them wrap
+   among themselves rather than pushing a whole stat onto a second row. */
+.view-controls {
+  flex: none;
+  text-align: right;
+  max-width: 214px;
+}
 
-.view-controls .controls { margin-top: var(--s-2); }
+.view-controls .controls {
+  margin-top: var(--s-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
 .stat { min-width: 108px; }
 
@@ -1028,3 +1038,125 @@ body {
   white-space: nowrap;
 }
 
+
+/* ===================================================================
+   List filtering and sorting
+   =================================================================== */
+
+.list-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.search {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--surface-sunk);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  width: 168px;
+  transition: border-color var(--dur) var(--ease), width var(--dur) var(--ease);
+}
+
+.search::placeholder { color: var(--ink-muted); }
+
+.search:focus {
+  outline: none;
+  border-color: var(--cat-1);
+  width: 208px;
+}
+
+/* Reordering rows under a moving cursor is what makes a busy list impossible
+   to click. While the pointer is in the list the order is held still; the
+   numbers keep updating. */
+.list-hint {
+  font-size: 11px;
+  color: var(--ink-muted);
+  padding: var(--s-2) var(--s-2) 0;
+}
+
+.list-empty {
+  padding: var(--s-5) var(--s-2);
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+/* ===================================================================
+   Side-by-side layout
+
+   For a portrait screen, or simply for anyone who prefers the list next
+   to the picture rather than under it.
+   =================================================================== */
+
+#view-apps[data-layout="side"] {
+  flex-direction: row;
+  gap: 0;
+  min-height: 0;
+}
+
+#view-apps[data-layout="side"] .list-section {
+  order: 1;
+  flex: 1 1 52%;
+  max-height: none;
+  min-width: 0;
+  padding: var(--s-5) var(--s-4) var(--s-5) var(--s-6);
+}
+
+#view-apps[data-layout="side"] .map-section {
+  order: 2;
+  flex: 1 1 48%;
+  min-width: 0;
+  padding: var(--s-5) var(--s-6) var(--s-5) var(--s-4);
+  border-left: 1px solid var(--hairline);
+}
+
+#view-apps[data-layout="side"] .list-scroll { border-top: none; }
+
+/* Below this width the two columns are narrower than either needs, so the
+   stacked arrangement is used regardless of the setting. */
+@media (max-width: 760px) {
+  #view-apps[data-layout="side"] {
+    flex-direction: column;
+  }
+  #view-apps[data-layout="side"] .map-section {
+    border-left: none;
+    padding: var(--s-5) var(--s-6) var(--s-3);
+  }
+  #view-apps[data-layout="side"] .list-section {
+    max-height: 46%;
+    padding: 0 var(--s-6) var(--s-5);
+  }
+}
+
+/* In the narrow column the title and the tools cannot share a line. */
+#view-apps[data-layout="side"] .list-section .section-head {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s-2);
+}
+
+#view-apps[data-layout="side"] .list-tools {
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+#view-apps[data-layout="side"] .search {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+#view-apps[data-layout="side"] .search:focus { width: auto; }
+
+/* The row grid is sized for a full-width list; give the numbers less room
+   when the list is sharing the window with the map. */
+#view-apps[data-layout="side"] .row {
+  grid-template-columns: 1fr 58px 76px 68px;
+  gap: var(--s-2);
+}
+
+#view-apps[data-layout="side"] .map-section .section-note { display: none; }
