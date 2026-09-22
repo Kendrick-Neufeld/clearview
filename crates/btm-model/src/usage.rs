@@ -16,6 +16,13 @@ pub struct Usage {
     pub mem_rss: u64,
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,
+    /// Share of one GPU's engine time, 0.0–1.0.
+    pub gpu_busy: f64,
+    pub gpu_mem: u64,
+    /// TCP throughput in bytes per second. Always an underestimate: UDP, and
+    /// therefore most modern browser traffic, carries no per-socket counter.
+    pub net_rx_bps: f64,
+    pub net_tx_bps: f64,
     /// Bytes in this total that came from RSS because no PSS reading was
     /// available. Kept as a quantity rather than a flag: with hundreds of
     /// processes on a machine, *some* process always misses the sampling window,
@@ -38,6 +45,10 @@ impl Usage {
             mem_rss: p.rss_bytes,
             disk_read_bps: p.disk_read_bps.unwrap_or(0.0),
             disk_write_bps: p.disk_write_bps.unwrap_or(0.0),
+            gpu_busy: p.gpu_busy.unwrap_or(0.0),
+            gpu_mem: p.gpu_mem_bytes,
+            net_rx_bps: p.net_rx_bps.unwrap_or(0.0),
+            net_tx_bps: p.net_tx_bps.unwrap_or(0.0),
             mem_unmeasured: unmeasured,
         }
     }
@@ -59,6 +70,11 @@ impl Usage {
         self.cpu_cores * 100.0
     }
 
+    /// Total network throughput, both directions.
+    pub fn net_bps(&self) -> f64 {
+        self.net_rx_bps + self.net_tx_bps
+    }
+
     /// How much of the reported memory is double-counted by tools that sum RSS.
     pub fn rss_overcount(&self) -> u64 {
         self.mem_rss.saturating_sub(self.mem_pss)
@@ -72,6 +88,10 @@ impl std::ops::AddAssign for Usage {
         self.mem_rss += o.mem_rss;
         self.disk_read_bps += o.disk_read_bps;
         self.disk_write_bps += o.disk_write_bps;
+        self.gpu_busy += o.gpu_busy;
+        self.gpu_mem += o.gpu_mem;
+        self.net_rx_bps += o.net_rx_bps;
+        self.net_tx_bps += o.net_tx_bps;
         self.mem_unmeasured += o.mem_unmeasured;
     }
 }

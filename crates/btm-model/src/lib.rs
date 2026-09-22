@@ -135,6 +135,15 @@ pub struct SystemModel {
     pub mem: btm_probe::system::MemInfo,
     pub pressure: btm_probe::system::SystemPressure,
     pub interval_secs: Option<f64>,
+
+    pub thermals: btm_probe::sensors::Thermals,
+    pub power_w: Option<f32>,
+    pub core_mhz: Vec<u32>,
+    /// Which physical core each logical CPU sits on, so a hyper-thread can be
+    /// shown with the temperature it actually shares.
+    pub core_of_cpu: Vec<usize>,
+    pub gpus: Vec<btm_probe::gpu::GpuInfo>,
+    pub interfaces: Vec<btm_probe::sampler::InterfaceRate>,
 }
 
 impl SystemModel {
@@ -175,6 +184,12 @@ impl SystemModel {
             mem: sample.mem,
             pressure: sample.pressure,
             interval_secs: sample.interval_secs,
+            thermals: sample.thermals.clone(),
+            power_w: sample.power_w,
+            core_mhz: sample.core_mhz.clone(),
+            core_of_cpu: sample.core_of_cpu.clone(),
+            gpus: sample.gpus.clone(),
+            interfaces: sample.interfaces.clone(),
         }
     }
 

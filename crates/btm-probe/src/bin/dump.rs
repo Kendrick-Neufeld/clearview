@@ -26,6 +26,10 @@ fn main() -> std::io::Result<()> {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
+    if args.iter().any(|a| a == "--devices") {
+        return devices(interval);
+    }
+
     let mut sampler = Sampler::new(SamplerConfig {
         // The dump is a one-shot, so take the full PSS cost immediately rather
         // than waiting for the periodic refresh.
@@ -45,6 +49,117 @@ fn main() -> std::io::Result<()> {
         None => print_top(&s, top),
     }
     Ok(())
+}
+
+/// Reads the hardware sensors, GPUs and network interfaces once, so the values
+/// can be checked against whatever else the machine reports.
+fn devices(interval: f64) -> std::io::Result<()> {
+    use btm_probe::{gpu, net, sensors};
+
+    let mut power = sensors::PowerMeter::new();
+    let _ = power.read_watts();
+    let before_drm = gpu::read_drm_clients();
+    let before_net = net::read_interfaces();
+    let t0 = std::time::Instant::now();
+    thread::sleep(Duration::from_secs_f64(interval));
+    let dt = t0.elapsed().as_secs_f64();
+
+    let t = sensors::read_thermals();
+    println!("── thermals ──────────────────────────────");
+    println!("  cpu package  {}", opt_c(t.cpu_package_c));
+    for (i, c) in t.cores_c.iter().enumerate() {
+        println!("  core {i:<7}  {}", opt_c(*c));
+    }
+    println!("  nvme         {}", opt_c(t.nvme_c));
+    println!("  wifi         {}", opt_c(t.wifi_c));
+    println!("  ambient      {}", opt_c(t.ambient_c));
+
+    println!();
+    println!("── cpu ───────────────────────────────────");
+    let freqs = sensors::core_frequencies_mhz();
+    let map = sensors::logical_to_physical_core();
+    println!("  {} logical cpus on {} physical cores",
+             freqs.len(), map.iter().collect::<std::collections::BTreeSet<_>>().len());
+    println!("  frequency    {} MHz avg, {} MHz peak",
+             freqs.iter().sum::<u32>() / freqs.len().max(1) as u32,
+             freqs.iter().max().copied().unwrap_or(0));
+    match power.read_watts() {
+        Some(w) => println!("  package draw {w:.1} W"),
+        None => println!("  package draw unavailable"),
+    }
+
+    println!();
+    println!("── gpus ──────────────────────────────────");
+    for (card, driver) in gpu::list_devices() {
+        println!("  {card} ({driver})");
+    }
+    let after_drm = gpu::read_drm_clients();
+    let mut busy_ns = 0u64;
+    let mut per_pid: std::collections::HashMap<i32, u64> = std::collections::HashMap::new();
+    for (id, now) in &after_drm {
+        let was = before_drm.get(id).map(|c| c.total_ns).unwrap_or(0);
+        let delta = now.total_ns.saturating_sub(was);
+        busy_ns += delta;
+        *per_pid.entry(now.pid).or_default() += delta;
+    }
+    println!("  integrated   {:.1}% busy (summed from {} drm clients)",
+             busy_ns as f64 / 1e9 / dt * 100.0, after_drm.len());
+    let mut top: Vec<_> = per_pid.into_iter().filter(|(_, ns)| *ns > 0).collect();
+    top.sort_unstable_by_key(|(_, ns)| std::cmp::Reverse(*ns));
+    for (pid, ns) in top.iter().take(5) {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        println!("    pid {pid:<7} {:.1}%  {}", *ns as f64 / 1e9 / dt * 100.0, comm.trim());
+    }
+    for g in gpu::read_nvidia() {
+        println!("  {}", g.name);
+        println!("    {:.0}% busy · {} · {} MiB used · {:.0} W · {} MHz",
+                 g.busy.unwrap_or(0.0) * 100.0,
+                 opt_c(g.temp_c),
+                 g.mem_used_bytes.unwrap_or(0) / 1024 / 1024,
+                 g.power_w.unwrap_or(0.0),
+                 g.clock_mhz.unwrap_or(0));
+    }
+
+    println!();
+    println!("── network ───────────────────────────────");
+    let after_net = net::read_interfaces();
+    for now in after_net.iter().filter(|i| i.is_real()) {
+        let was = before_net.iter().find(|i| i.name == now.name);
+        let (rx, tx) = match was {
+            Some(w) => (
+                (now.rx_bytes.saturating_sub(w.rx_bytes)) as f64 / dt,
+                (now.tx_bytes.saturating_sub(w.tx_bytes)) as f64 / dt,
+            ),
+            None => (0.0, 0.0),
+        };
+        println!("  {:<12} down {:>8}/s   up {:>8}/s", now.name, rate(rx), rate(tx));
+    }
+    let traffic = net::read_process_traffic();
+    let mut by_bytes: Vec<_> = traffic.into_iter().collect();
+    by_bytes.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.rx_bytes + t.tx_bytes));
+    println!("  busiest processes by total tcp bytes this connection lifetime:");
+    for (pid, t) in by_bytes.iter().take(5) {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        println!("    pid {pid:<7} {:>9} down {:>9} up  {} sockets  {}",
+                 bytes(t.rx_bytes), bytes(t.tx_bytes), t.sockets, comm.trim());
+    }
+    Ok(())
+}
+
+fn opt_c(v: Option<f32>) -> String {
+    v.map(|v| format!("{v:.0}°C")).unwrap_or_else(|| "—".into())
+}
+
+fn rate(bps: f64) -> String {
+    if bps >= 1024.0 * 1024.0 { format!("{:.1} MB", bps / 1024.0 / 1024.0) }
+    else if bps >= 1024.0 { format!("{:.0} KB", bps / 1024.0) }
+    else { format!("{bps:.0} B") }
+}
+
+fn bytes(b: u64) -> String {
+    if b >= 1024 * 1024 * 1024 { format!("{:.1} GB", b as f64 / 1024.0f64.powi(3)) }
+    else if b >= 1024 * 1024 { format!("{:.0} MB", b as f64 / 1024.0 / 1024.0) }
+    else { format!("{:.0} KB", b as f64 / 1024.0) }
 }
 
 fn print_system(s: &Sample) {

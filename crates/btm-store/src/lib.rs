@@ -40,6 +40,37 @@ const APPS_PER_BUCKET: usize = 10;
 
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
+/// Which stored quantity a query is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Metric {
+    Cpu,
+    Memory,
+    Gpu,
+    Network,
+}
+
+impl Metric {
+    /// The per-app column this metric lives in. Fixed strings only — these are
+    /// interpolated into SQL, so they must never come from outside.
+    fn column(self) -> &'static str {
+        match self {
+            Metric::Cpu => "cpu_pm",
+            Metric::Memory => "mem_mb",
+            Metric::Gpu => "gpu_pm",
+            Metric::Network => "net_kbps",
+        }
+    }
+
+    pub fn parse(name: &str) -> Metric {
+        match name {
+            "memory" => Metric::Memory,
+            "gpu" => Metric::Gpu,
+            "network" => Metric::Network,
+            _ => Metric::Cpu,
+        }
+    }
+}
+
 /// One machine-wide reading. Integers throughout, scaled on the way in.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct SystemPoint {
@@ -53,6 +84,18 @@ pub struct SystemPoint {
     pub psi_cpu_pm: u16,
     pub psi_mem_pm: u16,
     pub psi_io_pm: u16,
+    /// Integrated and discrete GPU busy, per mille.
+    pub gpu_pm: u16,
+    pub gpu2_pm: u16,
+    /// Whole degrees: a tenth of a degree is below what anyone acts on, and
+    /// storing it would double the width of the column for nothing.
+    pub cpu_temp_c: u8,
+    pub gpu_temp_c: u8,
+    /// Package power draw in whole watts.
+    pub power_w: u16,
+    /// Whole-machine network throughput in kilobytes per second.
+    pub net_rx_kbps: u32,
+    pub net_tx_kbps: u32,
 }
 
 /// One app's reading in one bucket.
@@ -64,6 +107,8 @@ pub struct AppPoint {
     pub name: String,
     pub cpu_pm: u16,
     pub mem_mb: u32,
+    pub gpu_pm: u16,
+    pub net_kbps: u32,
 }
 
 /// A row read back out.
@@ -72,6 +117,8 @@ pub struct AppSeriesRow {
     pub t: i64,
     pub cpu_pm: u16,
     pub mem_mb: u32,
+    pub gpu_pm: u16,
+    pub net_kbps: u32,
 }
 
 pub struct Store {
@@ -165,16 +212,62 @@ impl Store {
             CREATE INDEX IF NOT EXISTS app_series_by_app
                 ON app_series (app_id, res, t);
             ",
+        )?;
+
+        // Columns added after the first release. SQLite's ADD COLUMN is a
+        // metadata-only change, so this costs nothing on an existing file and
+        // keeps the history that is already recorded.
+        self.add_columns(
+            "system_series",
+            &[
+                ("gpu_pm", "INTEGER NOT NULL DEFAULT 0"),
+                ("gpu2_pm", "INTEGER NOT NULL DEFAULT 0"),
+                ("cpu_temp_c", "INTEGER NOT NULL DEFAULT 0"),
+                ("gpu_temp_c", "INTEGER NOT NULL DEFAULT 0"),
+                ("power_w", "INTEGER NOT NULL DEFAULT 0"),
+                ("net_rx_kbps", "INTEGER NOT NULL DEFAULT 0"),
+                ("net_tx_kbps", "INTEGER NOT NULL DEFAULT 0"),
+            ],
+        )?;
+        self.add_columns(
+            "app_series",
+            &[
+                ("gpu_pm", "INTEGER NOT NULL DEFAULT 0"),
+                ("net_kbps", "INTEGER NOT NULL DEFAULT 0"),
+            ],
         )
+    }
+
+    fn add_columns(&self, table: &str, columns: &[(&str, &str)]) -> Result<()> {
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            for name in names {
+                existing.insert(name?);
+            }
+        }
+        for (name, decl) in columns {
+            if !existing.contains(*name) {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl};"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Records one fine-resolution machine reading.
     pub fn record_system(&self, res: u32, p: &SystemPoint) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO system_series
-               (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![res, p.t, p.cpu_pm, p.mem_mb, p.swap_mb, p.psi_cpu_pm, p.psi_mem_pm, p.psi_io_pm],
+               (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
+                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                res, p.t, p.cpu_pm, p.mem_mb, p.swap_mb, p.psi_cpu_pm, p.psi_mem_pm, p.psi_io_pm,
+                p.gpu_pm, p.gpu2_pm, p.cpu_temp_c, p.gpu_temp_c, p.power_w,
+                p.net_rx_kbps, p.net_tx_kbps
+            ],
         )?;
         Ok(())
     }
@@ -208,8 +301,8 @@ impl Store {
             let mut insert_app = tx.prepare("INSERT INTO app (key, name) VALUES (?1, ?2)")?;
             let mut rename = tx.prepare("UPDATE app SET name = ?2 WHERE id = ?1 AND name <> ?2")?;
             let mut insert_row = tx.prepare(
-                "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
 
             for p in &chosen {
@@ -225,7 +318,7 @@ impl Store {
                         tx.last_insert_rowid()
                     }
                 };
-                insert_row.execute(params![res, t, id, p.cpu_pm, p.mem_mb])?;
+                insert_row.execute(params![res, t, id, p.cpu_pm, p.mem_mb, p.gpu_pm, p.net_kbps])?;
             }
         }
         tx.commit()?;
@@ -244,7 +337,8 @@ impl Store {
         let cutoff = (now / bucket) * bucket;
         let n = self.conn.execute(
             "INSERT OR REPLACE INTO system_series
-               (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm)
+               (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
+                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps)
              SELECT ?2,
                     (t / ?3) * ?3,
                     CAST(AVG(cpu_pm)     AS INTEGER),
@@ -252,7 +346,17 @@ impl Store {
                     CAST(AVG(swap_mb)    AS INTEGER),
                     CAST(AVG(psi_cpu_pm) AS INTEGER),
                     CAST(AVG(psi_mem_pm) AS INTEGER),
-                    CAST(AVG(psi_io_pm)  AS INTEGER)
+                    CAST(AVG(psi_io_pm)  AS INTEGER),
+                    CAST(AVG(gpu_pm)     AS INTEGER),
+                    CAST(AVG(gpu2_pm)    AS INTEGER),
+                    -- Temperature and power roll up as the *peak*, not the
+                    -- mean: a ten-minute average hides exactly the thermal
+                    -- excursion someone opens this view to find.
+                    MAX(cpu_temp_c),
+                    MAX(gpu_temp_c),
+                    MAX(power_w),
+                    CAST(AVG(net_rx_kbps) AS INTEGER),
+                    CAST(AVG(net_tx_kbps) AS INTEGER)
                FROM system_series
               WHERE res = ?1 AND t < ?4
               GROUP BY (t / ?3)",
@@ -266,10 +370,12 @@ impl Store {
         let bucket = to as i64;
         let cutoff = (now / bucket) * bucket;
         let n = self.conn.execute(
-            "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb)
+            "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps)
              SELECT ?2, (t / ?3) * ?3, app_id,
                     CAST(AVG(cpu_pm) AS INTEGER),
-                    CAST(AVG(mem_mb) AS INTEGER)
+                    CAST(AVG(mem_mb) AS INTEGER),
+                    CAST(AVG(gpu_pm) AS INTEGER),
+                    CAST(AVG(net_kbps) AS INTEGER)
                FROM app_series
               WHERE res = ?1 AND t < ?4
               GROUP BY (t / ?3), app_id",
@@ -310,7 +416,8 @@ impl Store {
     /// Machine history between two times, oldest first.
     pub fn system_series(&self, res: u32, since: i64, until: i64) -> Result<Vec<SystemPoint>> {
         let mut stmt = self.conn.prepare(
-            "SELECT t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm
+            "SELECT t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
+                    gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps
                FROM system_series
               WHERE res = ?1 AND t >= ?2 AND t <= ?3
               ORDER BY t",
@@ -324,6 +431,13 @@ impl Store {
                 psi_cpu_pm: r.get(4)?,
                 psi_mem_pm: r.get(5)?,
                 psi_io_pm: r.get(6)?,
+                gpu_pm: r.get(7)?,
+                gpu2_pm: r.get(8)?,
+                cpu_temp_c: r.get(9)?,
+                gpu_temp_c: r.get(10)?,
+                power_w: r.get(11)?,
+                net_rx_kbps: r.get(12)?,
+                net_tx_kbps: r.get(13)?,
             })
         })?;
         rows.collect()
@@ -338,13 +452,19 @@ impl Store {
         until: i64,
     ) -> Result<Vec<AppSeriesRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.t, s.cpu_pm, s.mem_mb
+            "SELECT s.t, s.cpu_pm, s.mem_mb, s.gpu_pm, s.net_kbps
                FROM app_series s JOIN app a ON a.id = s.app_id
               WHERE a.key = ?1 AND s.res = ?2 AND s.t >= ?3 AND s.t <= ?4
               ORDER BY s.t",
         )?;
         let rows = stmt.query_map(params![key, res, since, until], |r| {
-            Ok(AppSeriesRow { t: r.get(0)?, cpu_pm: r.get(1)?, mem_mb: r.get(2)? })
+            Ok(AppSeriesRow {
+                t: r.get(0)?,
+                cpu_pm: r.get(1)?,
+                mem_mb: r.get(2)?,
+                gpu_pm: r.get(3)?,
+                net_kbps: r.get(4)?,
+            })
         })?;
         rows.collect()
     }
@@ -354,16 +474,53 @@ impl Store {
     /// This is what turns "something spiked at 17:32" into "Vesktop spiked at
     /// 17:32". Per-app rows exist only at minute resolution and coarser, so the
     /// caller has to round to a bucket that was actually written.
-    pub fn top_app_in_bucket(&self, res: u32, t: i64) -> Result<Option<(String, u16)>> {
+    pub fn top_app_in_bucket(
+        &self,
+        res: u32,
+        t: i64,
+        metric: Metric,
+    ) -> Result<Option<(String, u32)>> {
+        let column = metric.column();
         self.conn
             .query_row(
-                "SELECT a.name, s.cpu_pm
-                   FROM app_series s JOIN app a ON a.id = s.app_id
-                  WHERE s.res = ?1 AND s.t = ?2
-                  ORDER BY s.cpu_pm DESC
-                  LIMIT 1",
+                &format!(
+                    "SELECT a.name, s.{column}
+                       FROM app_series s JOIN app a ON a.id = s.app_id
+                      WHERE s.res = ?1 AND s.t = ?2
+                      ORDER BY s.{column} DESC
+                      LIMIT 1"
+                ),
                 params![res, t],
                 |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// The app whose memory grew most between two buckets.
+    ///
+    /// Memory is a level, not a rate, so an outlier in the *level* only says
+    /// "a lot is in use", which the graph already shows. What is worth pointing
+    /// at is the moment something started holding much more than it was — so
+    /// this compares one bucket against the one before it and returns the
+    /// largest riser.
+    pub fn biggest_grower(
+        &self,
+        res: u32,
+        previous_t: i64,
+        t: i64,
+    ) -> Result<Option<(String, u32)>> {
+        self.conn
+            .query_row(
+                "SELECT a.name, (now.mem_mb - was.mem_mb) AS growth
+                   FROM app_series now
+                   JOIN app_series was
+                     ON was.app_id = now.app_id AND was.res = now.res AND was.t = ?3
+                   JOIN app a ON a.id = now.app_id
+                  WHERE now.res = ?1 AND now.t = ?2 AND growth > 0
+                  ORDER BY growth DESC
+                  LIMIT 1",
+                params![res, t, previous_t],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32)),
             )
             .optional()
     }
@@ -445,6 +602,8 @@ mod tests {
                 name: format!("App {i}"),
                 cpu_pm: i as u16,
                 mem_mb: 0,
+                gpu_pm: 0,
+                net_kbps: 0,
             })
             .collect();
         // One app using no CPU but a lot of memory must survive on that alone.
@@ -453,6 +612,8 @@ mod tests {
             name: "Hoarder".into(),
             cpu_pm: 0,
             mem_mb: 4096,
+            gpu_pm: 0,
+            net_kbps: 0,
         });
 
         let written = store.record_apps(RES_MINUTE, 60, &points).unwrap();
@@ -470,7 +631,14 @@ mod tests {
             .record_apps(
                 RES_FINE,
                 now - KEEP_FINE - 100,
-                &[AppPoint { key: "old".into(), name: "Old".into(), cpu_pm: 5, mem_mb: 5 }],
+                &[AppPoint {
+                    key: "old".into(),
+                    name: "Old".into(),
+                    cpu_pm: 5,
+                    mem_mb: 5,
+                    gpu_pm: 0,
+                    net_kbps: 0,
+                }],
             )
             .unwrap();
         assert_eq!(store.stats().unwrap().2, 1);
@@ -517,6 +685,8 @@ mod capacity {
                         name: name.clone(),
                         cpu_pm: ((t / step + i as i64) % 400) as u16,
                         mem_mb: (200 + (i as u32 * 37) % 3000),
+                        gpu_pm: ((t / step) % 300) as u16,
+                        net_kbps: ((t / step) % 5000) as u32,
                     })
                     .collect();
                 store.record_apps(res, t, &points).unwrap();
@@ -545,6 +715,13 @@ mod capacity {
                             psi_cpu_pm: 12,
                             psi_mem_pm: 0,
                             psi_io_pm: 48,
+                            gpu_pm: 300,
+                            gpu2_pm: 120,
+                            cpu_temp_c: 78,
+                            gpu_temp_c: 64,
+                            power_w: 28,
+                            net_rx_kbps: 900,
+                            net_tx_kbps: 300,
                         },
                     )
                     .unwrap();

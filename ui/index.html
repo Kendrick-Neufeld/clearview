@@ -117,6 +117,13 @@
           </figcaption>
           <div class="chart" id="chart-cpu"></div>
           <div class="spikes" id="spikes" hidden></div>
+
+          <div class="hardware" id="cpu-hardware"></div>
+          <div class="cores-head">
+            <span>Per core</span>
+            <span class="chart-note" id="cores-note"></span>
+          </div>
+          <div class="core-grid" id="core-grid"></div>
         </figure>
 
         <figure class="chart-card">
@@ -125,6 +132,27 @@
             <span class="chart-note">excluding reclaimable cache</span>
           </figcaption>
           <div class="chart" id="chart-mem"></div>
+          <div class="spikes" id="spikes-mem" hidden></div>
+        </figure>
+
+        <figure class="chart-card">
+          <figcaption>
+            <span class="chart-title">Graphics</span>
+            <span class="chart-note" id="gpu-note"></span>
+          </figcaption>
+          <div class="chart" id="chart-gpu"></div>
+          <div class="spikes" id="spikes-gpu" hidden></div>
+          <div class="hardware" id="gpu-hardware"></div>
+        </figure>
+
+        <figure class="chart-card">
+          <figcaption>
+            <span class="chart-title">Network</span>
+            <span class="chart-note">TCP only for per-app figures — see the note below</span>
+          </figcaption>
+          <div class="chart" id="chart-net"></div>
+          <div class="legend" id="net-legend"></div>
+          <div class="spikes" id="spikes-net" hidden></div>
         </figure>
 
         <figure class="chart-card">

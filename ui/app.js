@@ -18,7 +18,7 @@ const state = {
   span: 0,              // seconds of history shown; 0 means the live buffer
   history: [],          // machine series for the current span
   live: [],             // rolling per-second buffer, newest last
-  spikes: [],           // notable bursts for the current span
+  spikes: { cpu: [], memory: [], gpu: [], network: [] },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -567,34 +567,43 @@ async function loadHistory() {
     // Nothing to fetch: the live view is the buffer this page has been
     // filling from the stream.
     state.history = [];
-    state.spikes = [];
+    state.spikes = { cpu: [], memory: [], gpu: [], network: [] };
     renderPerf();
     return;
   }
-  const [rows, spikes] = await Promise.all([
+  const [rows, cpu, memory, gpu, network] = await Promise.all([
     invoke("system_history", { spanSecs: state.span }),
-    invoke("spikes", { spanSecs: state.span }),
+    invoke("spikes", { spanSecs: state.span, metric: "cpu" }),
+    invoke("spikes", { spanSecs: state.span, metric: "memory" }),
+    invoke("spikes", { spanSecs: state.span, metric: "gpu" }),
+    invoke("spikes", { spanSecs: state.span, metric: "network" }),
   ]);
   state.history = rows || [];
-  state.spikes = spikes || [];
+  state.spikes = {
+    cpu: cpu || [],
+    memory: memory || [],
+    gpu: gpu || [],
+    network: network || [],
+  };
   renderPerf();
 }
 
 /* The same outlier rule the backend applies to stored history, run over the
    live buffer — where the culprit is known per second rather than per minute. */
-function liveSpikes(points) {
+function liveSpikes(points, pick, nameOf, valueOf) {
   if (points.length < 12) return [];
-  const sorted = [...points].map((p) => p.cpu).sort((a, b) => a - b);
+  const sorted = points.map(pick).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
   const q3 = sorted[Math.floor(sorted.length * 0.75)];
-  const spread = Math.max(q3 - median, 3);
-  const threshold = Math.max(median + spread * 3, 20);
+  const largest = sorted[sorted.length - 1] || 1;
+  const spread = Math.max(q3 - median, largest / 20, 0.5);
+  const threshold = Math.max(median + spread * 3, largest * 0.25);
 
   const peaks = [];
   let run = null;
   for (const p of points) {
-    if (p.cpu >= threshold) {
-      if (!run || p.cpu > run.cpu) run = p;
+    if (pick(p) >= threshold && pick(p) > 0) {
+      if (!run || pick(p) > pick(run)) run = p;
     } else if (run) {
       peaks.push(run);
       run = null;
@@ -603,10 +612,37 @@ function liveSpikes(points) {
   if (run) peaks.push(run);
 
   return peaks
-    .sort((a, b) => b.cpu - a.cpu)
+    .sort((a, b) => pick(b) - pick(a))
     .slice(0, 6)
     .sort((a, b) => a.t - b.t)
-    .map((p) => ({ t: p.t, cpu_pm: p.cpu * 10, app: p.app, app_cpu_pm: p.appCpu * 10, app_window: 1 }));
+    .map((p) => ({
+      t: p.t,
+      value: pick(p),
+      app: nameOf(p),
+      app_value: valueOf(p),
+      app_window: 1,
+    }));
+}
+
+/* Memory's live events are the biggest jumps, not the biggest values — the
+   same reasoning the backend applies to stored history. */
+function liveGrowth(points) {
+  if (points.length < 4) return [];
+  const jumps = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const growth = points[i].memGb - points[i - 1].memGb;
+    if (growth > 0) jumps.push({ t: points[i].t, growth });
+  }
+  if (!jumps.length) return [];
+  const largest = Math.max(...jumps.map((j) => j.growth));
+  // A tenth of a gigabyte is the smallest jump worth a mark.
+  const floor = Math.max(largest / 3, 0.1);
+  return jumps
+    .filter((j) => j.growth >= floor)
+    .sort((a, b) => b.growth - a.growth)
+    .slice(0, 5)
+    .sort((a, b) => a.t - b.t)
+    .map((j) => ({ t: j.t, value: j.growth, app: null, app_value: 0, app_window: 1 }));
 }
 
 function renderPerf() {
@@ -614,8 +650,6 @@ function renderPerf() {
 
   const live = state.span === 0;
   const rows = live ? state.live : state.history;
-  const spikes = live ? liveSpikes(state.live) : state.spikes;
-  state.shownSpikes = spikes;
 
   $("perf-note").textContent = live
     ? rows.length
@@ -631,39 +665,115 @@ function renderPerf() {
       ? "No history has been recorded yet. The background collector is what fills these graphs — it may not be installed."
       : "Nothing recorded for this range yet. The collector writes its first points within a minute of starting.";
 
-  const cpuPoints = live
-    ? rows.map((r) => [r.t, r.cpu])
-    : rows.map((r) => [r.t, pmPct(r.cpu_pm)]);
+  const at = (fromLive, fromStored) => (live ? rows.map(fromLive) : rows.map(fromStored));
+
+  // ---- Processor ------------------------------------------------------
+  const cpuSpikes = live
+    ? liveSpikes(rows, (p) => p.cpu, (p) => p.app, (p) => p.appCpu)
+    : state.spikes.cpu;
 
   drawChart($("chart-cpu"), {
-    series: [{ name: "Processor", color: cssVar("--cat-1"), points: cpuPoints }],
+    series: [{
+      name: "Processor",
+      color: cssVar("--cat-1"),
+      points: at((r) => [r.t, r.cpu], (r) => [r.t, pmPct(r.cpu_pm)]),
+    }],
     yMax: 100,
     yFormat: (v) => `${Math.round(v)}%`,
     height: 168,
     empty,
-    markers: spikes.map((s) => ({
-      t: s.t,
-      v: pmPct(s.cpu_pm),
-      color: cssVar("--cat-2"),
-      label: s.app || null,
-    })),
+    markers: markersFor(cpuSpikes, (s) => (live ? s.value : pmPct(s.value))),
   });
+  renderSpikes($("spikes"), cpuSpikes, {
+    live,
+    format: (v) => `${fmtPct(live ? v : pmPct(v))}%`,
+    appFormat: (v) => `${fmtPct(live ? v : pmPct(v))}% of the machine`,
+  });
+  renderHardware();
 
-  renderSpikes(spikes, live);
-
+  // ---- Memory ---------------------------------------------------------
+  const memSpikes = live ? liveGrowth(rows) : state.spikes.memory;
   const totalGb = state.model ? state.model.mem.total / 1024 ** 3 : undefined;
   drawChart($("chart-mem"), {
     series: [{
       name: "Memory",
       color: cssVar("--cat-1"),
-      points: live ? rows.map((r) => [r.t, r.memGb]) : rows.map((r) => [r.t, r.mem_mb / 1024]),
+      points: at((r) => [r.t, r.memGb], (r) => [r.t, r.mem_mb / 1024]),
     }],
     yMax: totalGb,
     yFormat: (v) => `${v.toFixed(0)} GB`,
     height: 168,
     empty,
   });
+  renderSpikes($("spikes-mem"), memSpikes, {
+    live,
+    heading: "Biggest increases",
+    format: (v) => `+${(live ? v : v / 1024).toFixed(1)} GB`,
+    appFormat: (v) => `grew by ${(v / 1024).toFixed(1)} GB`,
+    note: live
+      ? "The moments memory rose fastest. Per-app attribution needs the collector — switch to Hour."
+      : null,
+  });
 
+  // ---- Graphics -------------------------------------------------------
+  const gpuSpikes = live
+    ? liveSpikes(rows, (p) => p.gpu, (p) => p.gpuApp, (p) => p.gpuAppPct)
+    : state.spikes.gpu;
+  drawChart($("chart-gpu"), {
+    series: [{
+      name: "Graphics",
+      color: cssVar("--cat-1"),
+      points: at((r) => [r.t, r.gpu], (r) => [r.t, pmPct(r.gpu_pm)]),
+    }],
+    yMax: 100,
+    yFormat: (v) => `${Math.round(v)}%`,
+    height: 168,
+    empty,
+    markers: markersFor(gpuSpikes, (s) => (live ? s.value : pmPct(s.value))),
+  });
+  renderSpikes($("spikes-gpu"), gpuSpikes, {
+    live,
+    format: (v) => `${fmtPct(live ? v : pmPct(v))}%`,
+    appFormat: (v) => `${fmtPct(live ? v : pmPct(v))}% of the GPU`,
+  });
+  renderGpuHardware();
+
+  // ---- Network --------------------------------------------------------
+  const netSpikes = live
+    ? liveSpikes(rows, (p) => p.rxKb + p.txKb, (p) => p.netApp, (p) => p.netAppKb)
+    : state.spikes.network;
+  drawChart($("chart-net"), {
+    series: [
+      {
+        name: "Down",
+        color: cssVar("--cat-1"),
+        points: at((r) => [r.t, r.rxKb], (r) => [r.t, r.net_rx_kbps]),
+      },
+      {
+        name: "Up",
+        color: cssVar("--cat-2"),
+        points: at((r) => [r.t, r.txKb], (r) => [r.t, r.net_tx_kbps]),
+      },
+    ],
+    yFormat: (v) => (v >= 1024 ? `${(v / 1024).toFixed(1)} MB/s` : `${Math.round(v)} KB/s`),
+    height: 168,
+    yMin: 64,
+    empty,
+    markers: markersFor(netSpikes, (s) => s.value),
+  });
+  fillLegend($("net-legend"), [
+    { name: "Down", color: cssVar("--cat-1") },
+    { name: "Up", color: cssVar("--cat-2") },
+  ]);
+  renderSpikes($("spikes-net"), netSpikes, {
+    live,
+    heading: "Busiest moments",
+    format: (v) => rateText(v),
+    appFormat: (v) => `${rateText(v)} over TCP`,
+    note: "Per-app figures count TCP only — UDP, and so most modern browser traffic, keeps no per-socket counter. The graph above counts everything, so it reads higher.",
+  });
+
+  // ---- Pressure -------------------------------------------------------
   const psi = [
     { name: "Processor", color: cssVar("--cat-1"), key: "psi_cpu_pm", i: 0 },
     { name: "Memory", color: cssVar("--cat-2"), key: "psi_mem_pm", i: 1 },
@@ -673,46 +783,167 @@ function renderPerf() {
     series: psi.map((p) => ({
       name: p.name,
       color: p.color,
-      points: live
-        ? rows.map((r) => [r.t, r.psi[p.i]])
-        : rows.map((r) => [r.t, pmPct(r[p.key])]),
+      points: at((r) => [r.t, r.psi[p.i]], (r) => [r.t, pmPct(r[p.key])]),
     })),
     yMax: 100,
     yFormat: (v) => `${Math.round(v)}%`,
     height: 168,
     empty,
   });
+  fillLegend($("psi-legend"), psi);
+}
 
-  // Three series share this frame, so a legend is not optional.
-  const legend = $("psi-legend");
-  legend.innerHTML = "";
-  for (const p of psi) {
+const rateText = (kb) =>
+  kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB/s` : `${Math.round(kb)} KB/s`;
+
+function markersFor(spikes, valueOf) {
+  return spikes.map((s) => ({
+    t: s.t,
+    v: valueOf(s),
+    color: cssVar("--cat-2"),
+    label: s.app || null,
+  }));
+}
+
+/* A legend is not optional once two series share a frame. */
+function fillLegend(host, entries) {
+  host.innerHTML = "";
+  for (const e of entries) {
     const item = document.createElement("div");
     item.className = "legend-item";
-    item.innerHTML = `<span class="legend-swatch"></span><span>${p.name}</span>`;
-    item.querySelector(".legend-swatch").style.background = p.color;
-    legend.appendChild(item);
+    item.innerHTML = `<span class="legend-swatch"></span><span>${e.name}</span>`;
+    item.querySelector(".legend-swatch").style.background = e.color;
+    host.appendChild(item);
   }
 }
 
-/* Every spike is listed, whether or not its label fitted on the chart. */
-function renderSpikes(spikes, live) {
-  const host = $("spikes");
+/* Package temperature, power draw and clock speed — the context that says
+   whether a busy processor is also a stressed one. */
+function renderHardware() {
+  const m = state.model;
+  const host = $("cpu-hardware");
+  if (!m) return;
+
+  const facts = [];
+  if (m.thermals.cpu_package_c != null) {
+    facts.push(["Package", `${Math.round(m.thermals.cpu_package_c)}°C`, heat(m.thermals.cpu_package_c)]);
+  }
+  if (m.power_w != null) facts.push(["Drawing", `${m.power_w.toFixed(1)} W`, null]);
+  if (m.core_mhz?.length) {
+    const peak = Math.max(...m.core_mhz);
+    const avg = Math.round(m.core_mhz.reduce((a, b) => a + b, 0) / m.core_mhz.length);
+    facts.push(["Clock", `${(avg / 1000).toFixed(1)} GHz avg`, null]);
+    facts.push(["Peak", `${(peak / 1000).toFixed(1)} GHz`, null]);
+  }
+  if (m.thermals.nvme_c != null) {
+    facts.push(["Drive", `${Math.round(m.thermals.nvme_c)}°C`, heat(m.thermals.nvme_c, 70, 80)]);
+  }
+  host.innerHTML = facts
+    .map(([label, value, level]) =>
+      `<div class="hw"><span class="hw-label">${label}</span><span class="hw-value"${
+        level ? ` data-heat="${level}"` : ""
+      }>${value}</span></div>`)
+    .join("");
+
+  renderCoreGrid();
+}
+
+/* A temperature is a status, so it gets the reserved status colours — and it
+   always shows its number, so the colour is never carrying the meaning alone. */
+function heat(c, warm = 75, hot = 90) {
+  if (c >= hot + 10) return "urgent";
+  if (c >= hot) return "hot";
+  if (c >= warm) return "warm";
+  return null;
+}
+
+function renderCoreGrid() {
+  const m = state.model;
+  const host = $("core-grid");
+  const busy = m.per_cpu_busy || [];
+  if (!busy.length) return;
+
+  const physical = m.core_of_cpu || [];
+  const temps = m.thermals.cores_c || [];
+  const steps = ["--seq-100", "--seq-250", "--seq-400", "--seq-550", "--seq-700"];
+
+  $("cores-note").textContent = temps.length
+    ? `${busy.length} threads on ${temps.length} cores — hyper-threads share a temperature`
+    : `${busy.length} threads`;
+
+  host.innerHTML = busy
+    .map((fraction, i) => {
+      const pct = fraction * 100;
+      const step = steps[Math.min(steps.length - 1, Math.floor(fraction * steps.length))];
+      const mhz = m.core_mhz?.[i];
+      const temp = temps[physical[i]];
+      const level = temp != null ? heat(temp) : null;
+      return `<div class="core-cell">
+        <div class="core-top">
+          <span class="core-id">CPU ${i}</span>
+          <span class="core-pct num">${Math.round(pct)}%</span>
+        </div>
+        <div class="core-bar"><div class="core-fill" style="width:${pct.toFixed(0)}%;background:var(${step})"></div></div>
+        <div class="core-foot">
+          <span>${mhz ? `${(mhz / 1000).toFixed(1)} GHz` : ""}</span>
+          <span${level ? ` class="hw-value" data-heat="${level}"` : ""}>${
+            temp != null ? `${Math.round(temp)}°C` : ""
+          }</span>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+function renderGpuHardware() {
+  const m = state.model;
+  const host = $("gpu-hardware");
+  if (!m?.gpus?.length) {
+    host.innerHTML = "";
+    $("gpu-note").textContent = "";
+    return;
+  }
+
+  const integrated = m.gpus.find((g) => g.busy_from_clients);
+  // Say where the number comes from. Summed client time misses work the driver
+  // cannot attribute, so it is a floor rather than a measurement.
+  $("gpu-note").textContent = integrated
+    ? "built-in GPU — summed from what each program reports, so a slight underestimate"
+    : "";
+
+  host.innerHTML = m.gpus
+    .map((g) => {
+      const bits = [`<span class="hw-label">${escapeHtml(g.name)}</span>`];
+      if (g.busy != null) bits.push(`<span class="hw-value">${Math.round(g.busy * 100)}%</span>`);
+      if (g.temp_c != null) {
+        bits.push(`<span class="hw-value" ${
+          heat(g.temp_c, 75, 85) ? `data-heat="${heat(g.temp_c, 75, 85)}"` : ""
+        }>${Math.round(g.temp_c)}°C</span>`);
+      }
+      if (g.power_w != null) bits.push(`<span class="hw-value">${g.power_w.toFixed(0)} W</span>`);
+      if (g.mem_used_bytes) bits.push(`<span class="hw-value">${bytesText(g.mem_used_bytes)}</span>`);
+      return `<div class="hw">${bits.join(" ")}</div>`;
+    })
+    .join("");
+}
+
+/* Every event is listed, whether or not its label fitted on the chart. */
+function renderSpikes(host, spikes, opts) {
   host.hidden = spikes.length === 0;
   if (!spikes.length) return;
 
   const rows = spikes
     .slice()
-    .sort((a, b) => b.cpu_pm - a.cpu_pm)
+    .sort((a, b) => b.value - a.value)
     .map((s) => {
       const when = new Date(s.t * 1000);
       const clock = `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
       const who = s.app
-        ? `${escapeHtml(s.app)} <em>— ${fmtPct(pmPct(s.app_cpu_pm))}% of the machine</em>`
+        ? `${escapeHtml(s.app)} <em>— ${opts.appFormat(s.app_value)}</em>`
         : `<em>no per-app record for this moment</em>`;
       return `<div class="spike-row">
         <span class="spike-time">${clock}</span>
-        <span class="spike-value">${fmtPct(pmPct(s.cpu_pm))}%</span>
+        <span class="spike-value">${opts.format(s.value)}</span>
         <span class="spike-app">${who}</span>
       </div>`;
     })
@@ -722,13 +953,14 @@ function renderSpikes(spikes, live) {
   // one-minute average is a reasonable inference, not a measurement, and
   // presenting it as certainty would be the wrong kind of confident.
   const window = spikes[0]?.app_window ?? 60;
-  const note = live
-    ? "Measured at the moment of each spike."
+  const provenance = opts.live
+    ? "Measured at the moment of each event."
     : `Attributed to the busiest app in the surrounding ${
         window >= 600 ? "ten minutes" : "minute"
       } — the finest per-app detail kept this far back. Use Live for exact attribution.`;
 
-  host.innerHTML = `<div class="spikes-head">Biggest bursts</div>${rows}<div class="spike-note">${note}</div>`;
+  host.innerHTML = `<div class="spikes-head">${opts.heading || "Biggest bursts"}</div>${rows}` +
+    `<div class="spike-note">${opts.note ? `${opts.note} ` : ""}${provenance}</div>`;
 }
 
 function describeStep(rows) {
@@ -898,10 +1130,19 @@ function recordLive(model) {
   // The top app is captured at the instant of the sample, so a live spike is
   // attributed exactly rather than to whoever dominated the surrounding minute.
   const top = model.apps.find((a) => a.kind !== "Kernel") || model.apps[0];
+  const byGpu = [...model.apps].sort((a, b) => b.totals.gpu_busy - a.totals.gpu_busy)[0];
+  const byNet = [...model.apps].sort(
+    (a, b) => b.totals.net_rx_bps + b.totals.net_tx_bps - (a.totals.net_rx_bps + a.totals.net_tx_bps),
+  )[0];
+  const integrated = model.gpus.find((g) => g.busy_from_clients);
+
   state.live.push({
     t: Math.floor(Date.now() / 1000),
     cpu: (model.cpu_busy ?? 0) * 100,
     memGb: (model.mem.total - model.mem.available) / 1024 ** 3,
+    gpu: (integrated?.busy ?? 0) * 100,
+    rxKb: model.interfaces.reduce((a, i) => a + i.rx_bps, 0) / 1024,
+    txKb: model.interfaces.reduce((a, i) => a + i.tx_bps, 0) / 1024,
     psi: [
       model.pressure.cpu?.some.avg10 ?? 0,
       model.pressure.memory?.some.avg10 ?? 0,
@@ -909,6 +1150,10 @@ function recordLive(model) {
     ],
     app: top?.name ?? null,
     appCpu: top ? (top.totals.cpu_cores / cpus) * 100 : 0,
+    gpuApp: byGpu?.totals.gpu_busy > 0 ? byGpu.name : null,
+    gpuAppPct: (byGpu?.totals.gpu_busy ?? 0) * 100,
+    netApp: byNet ? byNet.name : null,
+    netAppKb: byNet ? (byNet.totals.net_rx_bps + byNet.totals.net_tx_bps) / 1024 : 0,
   });
   if (state.live.length > LIVE_CAPACITY) state.live.shift();
 }

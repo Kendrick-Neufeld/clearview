@@ -9,7 +9,8 @@
  * like, which is why they are never used here.
  */
 
-const PAD = { top: 10, right: 12, bottom: 20, left: 46 };
+// The left gutter has to fit the widest y label; 46px clipped "100 KB/s".
+const PAD = { top: 10, right: 12, bottom: 20, left: 58 };
 
 /** Rounds an axis maximum up to a clean 1 / 2 / 5 × 10ⁿ step. */
 function niceTicks(max, count = 4) {

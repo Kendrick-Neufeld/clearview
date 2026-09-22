@@ -7,8 +7,11 @@
 
 pub mod conf;
 pub mod desktop;
+pub mod gpu;
+pub mod net;
 pub mod process;
 pub mod sampler;
+pub mod sensors;
 pub mod system;
 pub mod wm;
 

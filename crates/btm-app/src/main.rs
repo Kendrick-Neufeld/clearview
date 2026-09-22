@@ -75,29 +75,38 @@ async fn app_history(
     }))
 }
 
-/// One notable burst of processor use, with whatever caused it.
+/// One notable moment, with whatever caused it.
 #[derive(serde::Serialize)]
 struct Spike {
     t: i64,
-    cpu_pm: u16,
-    /// The app that used most processor in the bucket containing the spike.
-    /// `None` when no per-app row covers it — early in a session, or for a
-    /// spike older than the per-app retention window.
+    /// The machine-wide value at that moment, in the metric's own stored unit.
+    value: u32,
+    /// The app that accounts for it.
     app: Option<String>,
-    app_cpu_pm: u16,
+    app_value: u32,
     /// Seconds the per-app figure is averaged over. A five-second spike matched
     /// against a one-minute average is an attribution, not a measurement, and
     /// the interface says so rather than implying more precision than exists.
     app_window: u32,
 }
 
-/// Finds the processor spikes worth pointing at, and names the likely culprit.
+/// Finds the moments worth pointing at in one metric, and names the likely cause.
 ///
 /// Marking every bump would be noise; a chart littered with labels is one
-/// nobody reads. Only clear outliers survive, and only the largest handful of
-/// those are returned.
+/// nobody reads. Only clear outliers survive, and only the largest handful.
+///
+/// Memory is treated differently from the rest. Processor, graphics and network
+/// are rates, where a high value *is* the event. Memory is a level: flagging
+/// its outliers would just point at "a lot is in use", which the graph already
+/// shows. So for memory the events are the largest *increases*, and the culprit
+/// is whichever app grew most.
 #[tauri::command]
-async fn spikes(span_secs: i64, state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<Spike>, ()> {
+async fn spikes(
+    span_secs: i64,
+    metric: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Vec<Spike>, ()> {
+    let metric = btm_store::Metric::parse(&metric);
     let res = Store::resolution_for(span_secs);
     let series = with_history(&state, |store, now| {
         store.system_series(res, now - span_secs, now)
@@ -106,24 +115,91 @@ async fn spikes(span_secs: i64, state: tauri::State<'_, Arc<AppState>>) -> Resul
         return Ok(Vec::new());
     }
 
+    let value_of = |p: &btm_store::SystemPoint| -> u32 {
+        match metric {
+            btm_store::Metric::Cpu => p.cpu_pm as u32,
+            btm_store::Metric::Memory => p.mem_mb,
+            btm_store::Metric::Gpu => p.gpu_pm as u32,
+            btm_store::Metric::Network => p.net_rx_kbps + p.net_tx_kbps,
+        }
+    };
+
+    let app_res = res.max(btm_store::RES_MINUTE);
+    let bucket = app_res as i64;
+
+    let mut out: Vec<Spike> = if metric == btm_store::Metric::Memory {
+        growth_events(&series, value_of)
+            .into_iter()
+            .map(|(prev_t, p, growth)| {
+                let aligned = (p.t / bucket) * bucket;
+                let before = (prev_t / bucket) * bucket;
+                let found = with_history(&state, |store, _| {
+                    store.biggest_grower(app_res, before, aligned).map(|o| o.into_iter().collect())
+                });
+                match found.into_iter().next() {
+                    Some((name, grew)) => Spike {
+                        t: p.t,
+                        value: growth,
+                        app: Some(name),
+                        app_value: grew,
+                        app_window: app_res,
+                    },
+                    None => Spike {
+                        t: p.t,
+                        value: growth,
+                        app: None,
+                        app_value: 0,
+                        app_window: app_res,
+                    },
+                }
+            })
+            .collect()
+    } else {
+        outlier_events(&series, value_of)
+            .into_iter()
+            .map(|p| {
+                let aligned = (p.t / bucket) * bucket;
+                let found = with_history(&state, |store, _| {
+                    store
+                        .top_app_in_bucket(app_res, aligned, metric)
+                        .map(|o| o.into_iter().collect())
+                });
+                let (app, app_value) = match found.into_iter().next() {
+                    Some((name, value)) => (Some(name), value),
+                    None => (None, 0),
+                };
+                Spike { t: p.t, value: value_of(&p), app, app_value, app_window: app_res }
+            })
+            .collect()
+    };
+
+    out.sort_unstable_by_key(|s| s.t);
+    Ok(out)
+}
+
+/// Peaks that stand clearly above the usual level.
+fn outlier_events(
+    series: &[btm_store::SystemPoint],
+    value_of: impl Fn(&btm_store::SystemPoint) -> u32,
+) -> Vec<btm_store::SystemPoint> {
     // A median baseline rather than a mean: the spikes themselves would drag a
     // mean upward and hide the smaller ones.
-    let mut sorted: Vec<u16> = series.iter().map(|p| p.cpu_pm).collect();
+    let mut sorted: Vec<u32> = series.iter().map(&value_of).collect();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
     // Distance from the median to the upper quartile stands in for spread, and
     // unlike a standard deviation it is not inflated by the outliers.
     let q3 = sorted[sorted.len() * 3 / 4];
-    let spread = (q3.saturating_sub(median)).max(30);
-    let threshold = (median as u32 + spread as u32 * 3).max(200) as u16;
+    let spread = q3.saturating_sub(median).max(sorted.last().copied().unwrap_or(0) / 20).max(1);
+    let threshold = median + spread * 3;
 
     // Group runs of consecutive points over the threshold, keeping each run's
     // peak: one burst should produce one mark, not fifteen.
-    let mut peaks: Vec<btm_store::SystemPoint> = Vec::new();
+    let mut peaks = Vec::new();
     let mut run: Option<btm_store::SystemPoint> = None;
-    for p in &series {
-        if p.cpu_pm >= threshold {
-            if run.is_none_or(|best| p.cpu_pm > best.cpu_pm) {
+    for p in series {
+        if value_of(p) >= threshold {
+            if run.is_none_or(|best| value_of(p) > value_of(&best)) {
                 run = Some(*p);
             }
         } else if let Some(best) = run.take() {
@@ -134,32 +210,39 @@ async fn spikes(span_secs: i64, state: tauri::State<'_, Arc<AppState>>) -> Resul
         peaks.push(best);
     }
 
-    peaks.sort_unstable_by_key(|p| std::cmp::Reverse(p.cpu_pm));
+    peaks.sort_unstable_by_key(|p| std::cmp::Reverse(value_of(p)));
     peaks.truncate(6);
-
-    // Per-app rows are never written at the finest resolution.
-    let app_res = res.max(btm_store::RES_MINUTE);
-    let bucket = app_res as i64;
-    let mut out: Vec<Spike> = peaks
-        .into_iter()
-        .map(|p| {
-            let aligned = (p.t / bucket) * bucket;
-            let found = with_history(&state, |store, _| {
-                store.top_app_in_bucket(app_res, aligned).map(|o| o.into_iter().collect())
-            });
-            let (app, app_cpu_pm) = match found.into_iter().next() {
-                Some((name, cpu)) => (Some(name), cpu),
-                None => (None, 0),
-            };
-            Spike { t: p.t, cpu_pm: p.cpu_pm, app, app_cpu_pm, app_window: app_res }
-        })
-        .collect();
-
-    out.sort_unstable_by_key(|s| s.t);
-    Ok(out)
+    peaks
 }
 
-/// Whether any history exists yet, so the interface can explain an empty graph
+/// The largest jumps upward, for quantities where the level is uninteresting
+/// but the moment it changed is not.
+fn growth_events(
+    series: &[btm_store::SystemPoint],
+    value_of: impl Fn(&btm_store::SystemPoint) -> u32,
+) -> Vec<(i64, btm_store::SystemPoint, u32)> {
+    let mut jumps: Vec<(i64, btm_store::SystemPoint, u32)> = series
+        .windows(2)
+        .filter_map(|w| {
+            let growth = value_of(&w[1]).saturating_sub(value_of(&w[0]));
+            (growth > 0).then_some((w[0].t, w[1], growth))
+        })
+        .collect();
+    if jumps.is_empty() {
+        return Vec::new();
+    }
+
+    // Only jumps that are large relative to the biggest one seen; on a quiet
+    // machine nothing qualifies, which is the correct answer.
+    let largest = jumps.iter().map(|(_, _, g)| *g).max().unwrap_or(0);
+    let floor = (largest / 3).max(64); // at least 64 MB to be worth a mark
+    jumps.retain(|(_, _, g)| *g >= floor);
+    jumps.sort_unstable_by_key(|(_, _, g)| std::cmp::Reverse(*g));
+    jumps.truncate(5);
+    jumps
+}
+
+/// Whether any history exists yet/// Whether any history exists yet, so the interface can explain an empty graph
 /// instead of just showing one.
 #[tauri::command]
 async fn history_status(

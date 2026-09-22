@@ -37,19 +37,25 @@ struct Accum {
     name: String,
     cpu_pm_sum: u64,
     mem_mb_sum: u64,
+    gpu_pm_sum: u64,
+    net_kbps_sum: u64,
     ticks: u32,
 }
 
 impl Bucket {
-    fn add(&mut self, key: &str, name: &str, cpu_pm: u16, mem_mb: u32) {
+    fn add(&mut self, key: &str, name: &str, point: AppPoint) {
         let e = self.apps.entry(key.to_string()).or_insert_with(|| Accum {
             name: name.to_string(),
             cpu_pm_sum: 0,
             mem_mb_sum: 0,
+            gpu_pm_sum: 0,
+            net_kbps_sum: 0,
             ticks: 0,
         });
-        e.cpu_pm_sum += cpu_pm as u64;
-        e.mem_mb_sum += mem_mb as u64;
+        e.cpu_pm_sum += point.cpu_pm as u64;
+        e.mem_mb_sum += point.mem_mb as u64;
+        e.gpu_pm_sum += point.gpu_pm as u64;
+        e.net_kbps_sum += point.net_kbps as u64;
         e.ticks += 1;
         if e.name != name {
             e.name = name.to_string();
@@ -70,6 +76,8 @@ impl Bucket {
                     name: a.name,
                     cpu_pm: (a.cpu_pm_sum / n) as u16,
                     mem_mb: (a.mem_mb_sum / n) as u32,
+                    gpu_pm: (a.gpu_pm_sum / n) as u16,
+                    net_kbps: (a.net_kbps_sum / n) as u32,
                 }
             })
             .collect()
@@ -103,6 +111,15 @@ fn main() {
         pss_top_n: 48,
         collect_io: false,
         collect_cmdline: true,
+        // The collector records graphics, sensors and network too, but on
+        // slower clocks than the foreground view — it is storing minute
+        // averages, so finer sampling would buy nothing and cost power.
+        collect_gpu: true,
+        gpu_rediscover_every: 12,
+        collect_sensors: true,
+        collect_network: true,
+        network_interval: Duration::from_secs(10),
+        nvidia_interval: Duration::from_secs(15),
     });
     let mut db = DesktopDb::load();
     let mut db_age = 0u32;
@@ -118,6 +135,13 @@ fn main() {
         let Ok(sample) = sampler.sample() else { continue };
         let model = SystemModel::build(&sample, &wm::windows(), &db);
 
+        // The integrated GPU comes from summed client engine time; the
+        // discrete one, when present, reports its own counter.
+        let integrated = sample.gpus.iter().find(|g| g.busy_from_clients);
+        let discrete = sample.gpus.iter().find(|g| !g.busy_from_clients);
+        let net_rx: f64 = sample.interfaces.iter().map(|i| i.rx_bps).sum();
+        let net_tx: f64 = sample.interfaces.iter().map(|i| i.tx_bps).sum();
+
         let point = SystemPoint {
             // Align to the tick so re-runs overwrite rather than interleave.
             t: (t / RES_FINE as i64) * RES_FINE as i64,
@@ -127,6 +151,13 @@ fn main() {
             psi_cpu_pm: psi(sample.pressure.cpu),
             psi_mem_pm: psi(sample.pressure.memory),
             psi_io_pm: psi(sample.pressure.io),
+            gpu_pm: integrated.and_then(|g| g.busy).map(|b| per_mille(b as f64)).unwrap_or(0),
+            gpu2_pm: discrete.and_then(|g| g.busy).map(|b| per_mille(b as f64)).unwrap_or(0),
+            cpu_temp_c: celsius(sample.thermals.cpu_package_c),
+            gpu_temp_c: celsius(discrete.and_then(|g| g.temp_c)),
+            power_w: sample.power_w.map(|w| w.round().max(0.0) as u16).unwrap_or(0),
+            net_rx_kbps: (net_rx / 1024.0) as u32,
+            net_tx_kbps: (net_tx / 1024.0) as u32,
         };
         if let Err(e) = store.record_system(RES_FINE, &point) {
             eprintln!("clearview-collector: write failed: {e}");
@@ -137,8 +168,14 @@ fn main() {
             bucket.add(
                 &app.id,
                 &app.name,
-                per_mille(app.totals.cpu_cores / cpus),
-                mb(app.totals.mem_pss),
+                AppPoint {
+                    key: String::new(),
+                    name: String::new(),
+                    cpu_pm: per_mille(app.totals.cpu_cores / cpus),
+                    mem_mb: mb(app.totals.mem_pss),
+                    gpu_pm: per_mille(app.totals.gpu_busy),
+                    net_kbps: (app.totals.net_bps() / 1024.0) as u32,
+                },
             );
         }
         bucket.ticks += 1;
@@ -203,6 +240,11 @@ fn report(path: &std::path::Path) {
 /// two bytes per value instead of eight.
 fn per_mille(fraction: f64) -> u16 {
     (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16
+}
+
+/// Whole degrees, clamped into a byte. Nothing sensible reads above 255°C.
+fn celsius(v: Option<f32>) -> u8 {
+    v.map(|c| c.round().clamp(0.0, 255.0) as u8).unwrap_or(0)
 }
 
 fn mb(bytes: u64) -> u32 {

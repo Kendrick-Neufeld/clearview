@@ -51,6 +51,20 @@ cargo build --release
 | `btm-collector` | Background sampler, a `systemd --user` service. |
 | `btm-app` | Tauri GUI: applications view and performance view. |
 
+## What is measured, and how
+
+| | Source | Note |
+|---|---|---|
+| Per-core load | `/proc/stat` | per logical CPU |
+| Per-core temperature | `coretemp` hwmon | per *physical* core; hyper-threads share one |
+| Clock speed | `cpufreq` | per logical CPU |
+| Package power | Intel RAPL | energy counter differenced, wrap handled |
+| Built-in GPU | DRM fdinfo, summed per client | a floor, not a measurement — work the driver cannot attribute to a client is invisible |
+| Discrete GPU | `nvidia-smi` | sampled every few seconds, not every tick |
+| Per-app GPU | DRM fdinfo, keyed by client id | keyed by client, not pid, or a browser's use multiplies by its tab count |
+| Network, machine-wide | `/proc/net/dev` | counts everything |
+| Network, per app | `ss`, per-socket TCP counters | **TCP only** — UDP keeps no such counter, so QUIC is invisible and per-app sums read lower than the total |
+
 ## The two kinds of graph
 
 They answer different questions, and neither can answer the other's:

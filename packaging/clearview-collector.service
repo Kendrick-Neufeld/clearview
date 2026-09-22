@@ -20,17 +20,28 @@ IOSchedulingPriority=7
 MemoryMax=192M
 TasksMax=16
 
-# It only ever reads /proc and writes one file.
+# Hardening, deliberately limited to restrictions that do not create a
+# namespace.
+#
+# ProtectSystem, ProtectHome and PrivateTmp all looked like obvious wins and all
+# silently broke the collector. In a *user* unit each one puts the service in a
+# namespace whose credentials no longer satisfy the kernel's ptrace check, so
+# every /proc/<pid>/fdinfo read from another process returns EPERM — which is
+# precisely how per-process GPU use is measured. The service kept running and
+# quietly recorded zeroes.
+#
+# PrivateNetwork was worse: it gives the unit an empty network namespace, so
+# /proc/net/dev showed only loopback and every network figure was zero.
+#
+# What remains is seccomp and prctl based, costs nothing, and breaks nothing.
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%h/.local/share/clearview
-PrivateTmp=true
-PrivateNetwork=true
-RestrictAddressFamilies=AF_UNIX
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true
+RestrictSUIDSGID=true
+# AF_NETLINK is required: per-process network figures come from `ss`, which
+# asks the kernel over a netlink socket.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
