@@ -10,7 +10,9 @@ const state = {
   metric: "cpu",     // "cpu" | "mem"
   drilledApp: null,  // app id when viewing inside one app
   selected: null,
-  tiles: new Map(),  // key -> element, so tiles tween instead of flashing
+  tiles: new Map(),     // key -> element, so tiles tween instead of flashing
+  expanded: new Set(),  // pids whose explanation is open
+  cmdlines: new Map(),  // pid -> argv, fetched once
 };
 
 const $ = (id) => document.getElementById(id);
@@ -215,12 +217,7 @@ function renderMap(m) {
 
   $("map-empty").style.display = items.length ? "none" : "grid";
 
-  $("map-title").textContent = app ? app.name : "What is using this machine";
-  $("map-note").textContent = app
-    ? " — its processes. Click the background to go back."
-    : state.metric === "cpu"
-      ? " — block size is processor time"
-      : " — block size is memory";
+  renderCrumbs(app);
 
   const laid = squarify(items, rect.width, rect.height);
   const seen = new Set();
@@ -269,6 +266,29 @@ function renderMap(m) {
   }
 
   renderLegend(app);
+}
+
+/* The trail out of a drill-down. Escape and a background click still
+   work, but neither is discoverable, so neither counts as navigation. */
+function renderCrumbs(app) {
+  const drilled = Boolean(app);
+  $("crumbs").dataset.drilled = String(drilled);
+  $("crumb-back").hidden = !drilled;
+  $("crumb-sep").hidden = !drilled;
+  $("crumb-current").hidden = !drilled;
+  if (drilled) $("crumb-current").textContent = app.name;
+
+  $("map-note").textContent = drilled
+    ? ` — ${app.process_count} process${app.process_count === 1 ? "" : "es"}`
+    : state.metric === "cpu"
+      ? " — block size is processor time"
+      : " — block size is memory";
+}
+
+function drillOut() {
+  if (!state.drilledApp) return;
+  state.drilledApp = null;
+  if (state.model) renderMap(state.model);
 }
 
 function valueTextFor(t) {
@@ -360,6 +380,7 @@ function subtitleFor(a) {
    ================================================================== */
 
 function openDetail(appId) {
+  if (state.selected !== appId) state.expanded.clear();
   state.selected = appId;
   renderDetail();
   $("detail").dataset.open = "true";
@@ -385,6 +406,7 @@ function renderDetail() {
 
   const over = app.totals.mem_rss - app.totals.mem_pss;
   const body = $("detail-body");
+  const scroll = body.scrollTop;
   body.innerHTML = "";
 
   body.appendChild(
@@ -417,6 +439,8 @@ function renderDetail() {
 
   body.appendChild(html(`<div class="subhead">Processes</div>`));
   for (const root of app.roots) renderProc(root, body, 0);
+
+  body.scrollTop = scroll;
 }
 
 function countRoles(nodes, acc = new Map()) {
@@ -462,19 +486,37 @@ function renderProc(node, host, depth) {
     );
   }
 
-  // The longer "why does this exist" is one click away, so the list
-  // stays scannable.
-  el.querySelector(".proc-main").style.cursor = "pointer";
-  el.querySelector(".proc-main").onclick = async () => {
-    if (el.querySelector(".proc-why")) {
-      el.querySelector(".proc-why")?.remove();
-      el.querySelector(".proc-cmd")?.remove();
-      return;
-    }
+  // The longer "why does this exist" is one click away, so the list stays
+  // scannable. Whether it is open lives in state, not in the DOM: the panel
+  // redraws every second as the numbers change, and reading the DOM for the
+  // answer meant the text you were halfway through vanished each refresh.
+  const main = el.querySelector(".proc-main");
+  main.style.cursor = "pointer";
+  main.setAttribute("role", "button");
+  main.setAttribute("aria-expanded", String(state.expanded.has(node.pid)));
+
+  if (state.expanded.has(node.pid)) {
     el.appendChild(html(`<div class="proc-why">${escapeHtml(node.role.explanation)}</div>`));
-    const cmd = await invoke("process_cmdline", { pid: node.pid });
+    const cmd = state.cmdlines.get(node.pid);
     if (cmd?.length) {
       el.appendChild(html(`<div class="proc-cmd">${escapeHtml(cmd.join(" ").slice(0, 400))}</div>`));
+    }
+  }
+
+  main.onclick = async () => {
+    if (state.expanded.has(node.pid)) {
+      state.expanded.delete(node.pid);
+      renderDetail();
+      return;
+    }
+    state.expanded.add(node.pid);
+    renderDetail();
+    // Fetched once and cached, so reopening is instant and a refresh mid-read
+    // does not re-ask the backend.
+    if (!state.cmdlines.has(node.pid)) {
+      const cmd = await invoke("process_cmdline", { pid: node.pid });
+      state.cmdlines.set(node.pid, cmd || []);
+      if (state.expanded.has(node.pid)) renderDetail();
     }
   };
 
@@ -618,6 +660,8 @@ function wire() {
   $("metric-cpu").onclick = () => setMetric("cpu");
   $("metric-mem").onclick = () => setMetric("mem");
   $("detail-close").onclick = closeDetail;
+  $("crumb-back").onclick = drillOut;
+  $("crumb-root").onclick = drillOut;
 
   $("toggle-translucent").onclick = () => {
     const p = loadPrefs();
@@ -636,14 +680,9 @@ function wire() {
   const map = $("map");
   map.addEventListener("click", (ev) => {
     const tileEl = ev.target.closest(".tile");
-    if (!tileEl) {
-      // Clicking the background steps back out of a drill-down.
-      if (state.drilledApp) {
-        state.drilledApp = null;
-        if (state.model) renderMap(state.model);
-      }
-      return;
-    }
+    // Clicking the background still steps back out, as a shortcut for
+    // people who find it — the breadcrumb is what makes it discoverable.
+    if (!tileEl) return drillOut();
     const t = tileEl._tile;
     if (t.isOther) return;
     if (t.app) {
@@ -662,12 +701,8 @@ function wire() {
 
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;
-    if (state.drilledApp) {
-      state.drilledApp = null;
-      if (state.model) renderMap(state.model);
-    } else {
-      closeDetail();
-    }
+    if (state.drilledApp) drillOut();
+    else closeDetail();
   });
 
   let raf;

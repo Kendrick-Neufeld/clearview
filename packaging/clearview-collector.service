@@ -1,0 +1,38 @@
+[Unit]
+Description=Clearview history collector
+Documentation=https://github.com/bites/clearview
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/clearview-collector
+Restart=on-failure
+RestartSec=10
+
+# This runs all day for a graph nobody is watching right now, so it yields to
+# everything the user is actually doing.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+
+# Guard rails rather than expectations: steady state is a few megabytes of
+# database and a handful of megabytes resident.
+MemoryMax=192M
+TasksMax=16
+
+# It only ever reads /proc and writes one file.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/clearview
+PrivateTmp=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

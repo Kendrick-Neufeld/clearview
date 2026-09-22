@@ -17,7 +17,7 @@ them hard to read:
 
 ## Status
 
-**M1–M2 complete** — acquisition and the model, verified against real applications.
+**M1–M3 and M5 complete** — acquisition and the model, verified against real applications.
 On this machine 377 processes resolve to 61 apps.
 
 ```bash
@@ -47,9 +47,26 @@ cargo build --release
 |---|---|
 | `btm-probe` | Reads `/proc`, `/sys` and cgroups. Knows nothing about apps. |
 | `btm-model` | App identity, process roles, subtree aggregation. |
-| `btm-store` | SQLite time series for history and trendlines. *(M5)* |
-| `btm-collector` | Background sampler, a `systemd --user` service. *(M5)* |
-| `btm-app` | Tauri GUI. *(M3+)* |
+| `btm-store` | SQLite time series for history and trendlines. |
+| `btm-collector` | Background sampler, a `systemd --user` service. |
+| `btm-app` | Tauri GUI. |
+
+## What it costs
+
+Measured, not estimated. The collector runs all day for a graph nobody is
+watching right now, so it is built to disappear:
+
+| | |
+|---|---|
+| Collector CPU | **0.044%** of a 16-thread machine (0.7% of one core) |
+| Collector memory | **3.8 MB** (PSS) |
+| History on disk | **3.12 MB** at full steady state — a month of history |
+
+The size is held down by storing per-app figures only after averaging them in
+memory for a whole minute, keeping just the apps that mattered in that minute,
+scaling every value to a small integer instead of a float, and folding old
+samples into coarser buckets as they age. See `packaging/README.md` to install
+the service.
 
 ## Measurement rules
 

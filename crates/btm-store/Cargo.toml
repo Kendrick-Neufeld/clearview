@@ -1,0 +1,10 @@
+[package]
+name = "btm-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A deliberately small time series of system and per-app history."
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true

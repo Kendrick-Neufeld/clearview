@@ -60,10 +60,13 @@
          answer before a single word is read. -->
     <section class="map-section">
       <div class="section-head">
-        <div>
-          <span class="section-title" id="map-title">What is using this machine</span>
+        <nav class="crumbs" id="crumbs" aria-label="Breadcrumb">
+          <button class="crumb-back" id="crumb-back" hidden aria-label="Back to all applications">←</button>
+          <button class="crumb" id="crumb-root">All applications</button>
+          <span class="crumb-sep" id="crumb-sep" hidden>›</span>
+          <span class="crumb-current" id="crumb-current" hidden></span>
           <span class="section-note" id="map-note"></span>
-        </div>
+        </nav>
         <div class="controls" role="group" aria-label="Metric">
           <button class="toggle" id="metric-cpu" aria-pressed="true">Processor</button>
           <button class="toggle" id="metric-mem" aria-pressed="false">Memory</button>

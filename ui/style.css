@@ -64,6 +64,11 @@
   --s-6: 32px;
   --s-7: 48px;
 
+  /* Panels that float over other content need their own near-opaque
+     ground: a translucent overlay on a translucent page stacks two
+     washes, and the list underneath reads straight through it. */
+  --overlay: #1a1a19;
+
   --radius: 6px;
   --radius-lg: 10px;
 
@@ -79,6 +84,7 @@
   --plane:        rgba(13, 13, 13, 0.58);
   --surface:      rgba(26, 26, 25, 0.82);
   --surface-sunk: rgba(35, 35, 33, 0.82);
+  --overlay:      rgba(20, 20, 19, 0.96);
 }
 
 /* Light, opt-in ---------------------------------------------------- */
@@ -101,12 +107,14 @@
   --seq-400: #3987e5;
   --seq-550: #1c5cab;
   --seq-700: #0d366b;
+  --overlay: #fcfcfb;
 }
 
 :root[data-theme="light"][data-translucent="true"] {
   --plane:        rgba(249, 249, 247, 0.58);
   --surface:      rgba(252, 252, 251, 0.82);
   --surface-sunk: rgba(242, 241, 237, 0.82);
+  --overlay:      rgba(252, 252, 251, 0.96);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -273,6 +281,68 @@ body {
   font-size: 13px;
   font-weight: 500;
   color: var(--ink);
+}
+
+/* Drilling into an app used to be a one-way door: the way back was an
+   unmarked click on the background. A trail you can see and click is
+   the difference between a view and a dead end. */
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.crumb-back {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--ink-secondary);
+  background: var(--surface-sunk);
+  border: 1px solid var(--ring);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  cursor: pointer;
+  flex: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.crumb-back:hover { color: var(--ink); border-color: var(--baseline); }
+
+.crumb {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  padding: 2px 4px;
+  cursor: default;
+  flex: none;
+}
+
+/* Only clickable when it actually goes somewhere. */
+.crumbs[data-drilled="true"] .crumb {
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.crumbs[data-drilled="true"] .crumb:hover {
+  color: var(--ink);
+  background: var(--surface-sunk);
+}
+
+.crumb-sep { color: var(--ink-muted); flex: none; }
+
+.crumb-current {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .section-note {
@@ -479,7 +549,9 @@ body {
   right: 0;
   bottom: 0;
   width: min(440px, 92vw);
-  background: var(--surface);
+  background: var(--overlay);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
   border-left: 1px solid var(--hairline);
   box-shadow: -16px 0 40px -24px rgba(0, 0, 0, 0.35);
   transform: translateX(100%);
@@ -631,7 +703,7 @@ body {
   position: fixed;
   z-index: 40;
   max-width: 280px;
-  background: var(--surface);
+  background: var(--overlay);
   color: var(--ink);
   border: 1px solid var(--hairline);
   border-radius: var(--radius);

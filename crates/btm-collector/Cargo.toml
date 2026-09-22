@@ -1,0 +1,15 @@
+[package]
+name = "btm-collector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Background sampler that keeps a small rolling history."
+
+[dependencies]
+btm-model = { path = "../btm-model" }
+btm-probe = { path = "../btm-probe" }
+btm-store = { path = "../btm-store" }
+
+[[bin]]
+name = "clearview-collector"
+path = "src/main.rs"
