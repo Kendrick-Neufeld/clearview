@@ -17,12 +17,28 @@ them hard to read:
 
 ## Status
 
-**M1 complete** — the acquisition layer, verified against known loads.
+**M1–M2 complete** — acquisition and the model, verified against real applications.
+On this machine 377 processes resolve to 61 apps.
 
 ```bash
 cargo build --release
-./target/release/btm-dump --interval 2 --top 15
-./target/release/btm-dump --match vesktop     # one app, added up honestly
+
+./target/release/btm-apps                     # apps, busiest first
+./target/release/btm-apps --app vesktop       # one app, explained
+./target/release/btm-dump  --match vesktop    # the raw numbers underneath
+```
+
+```
+  Vesktop                       2.9%    1126 MB   8 processes
+      window   (2) Discord | Lobby | Broddars
+      memory   1126 MB actual — tools that sum RSS would say 1797 MB (1.6x)
+      3929    (2) Discord | Lob…   2.9% (0.6% own) Main process
+        3946    vesktop              2.0% (0.0% own) Process template
+                ↳ idle itself; the work is in the 2 processes below it
+          3948    vesktop              2.0% (0.0% own) Process template
+            4160    vesktop              2.0%           Window or tab
+        3996    vesktop              0.0%           Network
+        4236    vesktop              0.4%           Audio
 ```
 
 ## Layout
@@ -30,7 +46,7 @@ cargo build --release
 | Crate | Role |
 |---|---|
 | `btm-probe` | Reads `/proc`, `/sys` and cgroups. Knows nothing about apps. |
-| `btm-model` | App identity, process roles, subtree aggregation. *(M2)* |
+| `btm-model` | App identity, process roles, subtree aggregation. |
 | `btm-store` | SQLite time series for history and trendlines. *(M5)* |
 | `btm-collector` | Background sampler, a `systemd --user` service. *(M5)* |
 | `btm-app` | Tauri GUI. *(M3+)* |

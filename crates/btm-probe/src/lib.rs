@@ -6,8 +6,10 @@
 //! two samples (rates) and the guards needed to keep that arithmetic honest.
 
 pub mod conf;
+pub mod desktop;
 pub mod process;
 pub mod sampler;
 pub mod system;
+pub mod wm;
 
 pub use sampler::{ProcSample, Sample, Sampler};

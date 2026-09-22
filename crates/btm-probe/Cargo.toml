@@ -8,6 +8,7 @@ description = "Reads raw system and per-process metrics from /proc, /sys and cgr
 [dependencies]
 libc.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "btm-dump"
