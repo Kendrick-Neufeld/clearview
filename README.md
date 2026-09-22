@@ -17,7 +17,7 @@ them hard to read:
 
 ## Status
 
-**M1–M3 and M5 complete** — acquisition and the model, verified against real applications.
+**M1–M3, M5 and M6 complete** — acquisition and the model, verified against real applications.
 On this machine 377 processes resolve to 61 apps.
 
 ```bash
@@ -49,7 +49,7 @@ cargo build --release
 | `btm-model` | App identity, process roles, subtree aggregation. |
 | `btm-store` | SQLite time series for history and trendlines. |
 | `btm-collector` | Background sampler, a `systemd --user` service. |
-| `btm-app` | Tauri GUI. |
+| `btm-app` | Tauri GUI: applications view and performance view. |
 
 ## What it costs
 

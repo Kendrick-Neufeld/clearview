@@ -1,4 +1,5 @@
 import { squarify, foldTail } from "./treemap.js";
+import { drawChart, drawSparkline } from "./chart.js";
 
 /* ==================================================================
    State
@@ -13,6 +14,9 @@ const state = {
   tiles: new Map(),     // key -> element, so tiles tween instead of flashing
   expanded: new Set(),  // pids whose explanation is open
   cmdlines: new Map(),  // pid -> argv, fetched once
+  tab: "apps",          // "apps" | "perf"
+  span: 3600,           // seconds of history shown
+  history: [],          // machine series for the current span
 };
 
 const $ = (id) => document.getElementById(id);
@@ -437,10 +441,29 @@ function renderDetail() {
     body.appendChild(html(`<div class="note">Made up of ${parts}.</div>`));
   }
 
+  // One cheap query for the app being looked at, rather than sixty for a
+  // list nobody is reading.
+  const spark = html(`<div><div class="subhead">Processor, last 24 hours</div><div class="spark" id="app-spark"></div></div>`);
+  body.appendChild(spark);
+  loadAppSpark(app.id);
+
   body.appendChild(html(`<div class="subhead">Processes</div>`));
   for (const root of app.roots) renderProc(root, body, 0);
 
   body.scrollTop = scroll;
+}
+
+async function loadAppSpark(key) {
+  const rows = await invoke("app_history", { key, spanSecs: 86400 });
+  const host = $("app-spark");
+  // The panel redraws constantly; by the time this resolves the user may be
+  // looking at something else entirely.
+  if (!host || state.selected !== key) return;
+  if (!rows?.length) {
+    host.innerHTML = `<div class="chart-empty" style="min-height:34px;font-size:11px">No history for this app yet</div>`;
+    return;
+  }
+  drawSparkline(host, rows.map((r) => [r.t, r.cpu_pm / 10]), cssVar("--cat-1"));
 }
 
 function countRoles(nodes, acc = new Map()) {
@@ -526,6 +549,119 @@ function renderProc(node, host, depth) {
 
 const countDescendants = (n) =>
   n.children.reduce((a, c) => a + 1 + countDescendants(c), 0);
+
+/* ==================================================================
+   History
+
+   The live view can only ever show the moment it is running. Everything
+   before that comes from the collector, and when it has not been run
+   the graphs say so rather than showing a convincing flat line.
+   ================================================================== */
+
+const pmPct = (pm) => pm / 10;
+
+async function loadHistory() {
+  const rows = await invoke("system_history", { spanSecs: state.span });
+  state.history = rows || [];
+  renderPerf();
+}
+
+function renderPerf() {
+  if (state.tab !== "perf") return;
+
+  const rows = state.history;
+  const status = rows.length
+    ? `${rows.length} readings · one point every ${describeStep(rows)}`
+    : "";
+  $("perf-note").textContent = status ? ` — ${status}` : "";
+
+  const empty = state.collectorSeen === false
+    ? "No history has been recorded yet. The background collector is what fills these graphs — it may not be installed."
+    : "Nothing recorded for this range yet. The collector writes its first points within a minute of starting.";
+
+  drawChart($("chart-cpu"), {
+    series: [{ name: "Processor", color: cssVar("--cat-1"),
+               points: rows.map((r) => [r.t, pmPct(r.cpu_pm)]) }],
+    yMax: 100,
+    yFormat: (v) => `${Math.round(v)}%`,
+    height: 168,
+    empty,
+  });
+
+  const totalMb = state.model ? state.model.mem.total / (1024 * 1024) : 0;
+  drawChart($("chart-mem"), {
+    series: [{ name: "Memory", color: cssVar("--cat-1"),
+               points: rows.map((r) => [r.t, r.mem_mb / 1024]) }],
+    // Scaled against installed memory, so the line means something absolute
+    // rather than filling the frame whatever the numbers are.
+    yMax: totalMb ? totalMb / 1024 : undefined,
+    yFormat: (v) => `${v.toFixed(0)} GB`,
+    height: 168,
+    empty,
+  });
+
+  const psi = [
+    { name: "Processor", color: cssVar("--cat-1"), key: "psi_cpu_pm" },
+    { name: "Memory", color: cssVar("--cat-2"), key: "psi_mem_pm" },
+    { name: "Disk", color: cssVar("--cat-3"), key: "psi_io_pm" },
+  ];
+  drawChart($("chart-psi"), {
+    series: psi.map((p) => ({
+      name: p.name,
+      color: p.color,
+      points: rows.map((r) => [r.t, pmPct(r[p.key])]),
+    })),
+    yMax: 100,
+    yFormat: (v) => `${Math.round(v)}%`,
+    height: 168,
+    empty,
+  });
+
+  // Three series share this frame, so a legend is not optional.
+  const legend = $("psi-legend");
+  legend.innerHTML = "";
+  for (const p of psi) {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch"></span><span>${p.name}</span>`;
+    item.querySelector(".legend-swatch").style.background = p.color;
+    legend.appendChild(item);
+  }
+}
+
+function describeStep(rows) {
+  if (rows.length < 2) return "sample";
+  const step = rows[1].t - rows[0].t;
+  if (step < 60) return `${step} seconds`;
+  if (step < 3600) return `${Math.round(step / 60)} minutes`;
+  return `${Math.round(step / 3600)} hours`;
+}
+
+function setTab(tab, remember = true) {
+  state.tab = tab;
+  if (remember) {
+    const p = loadPrefs();
+    p.tab = tab;
+    savePrefs(p);
+  }
+  $("tab-apps").setAttribute("aria-selected", String(tab === "apps"));
+  $("tab-perf").setAttribute("aria-selected", String(tab === "perf"));
+  $("view-apps").hidden = tab !== "apps";
+  $("view-perf").hidden = tab !== "perf";
+  if (tab === "perf") loadHistory();
+  else if (state.model) renderMap(state.model);
+}
+
+function setSpan(span) {
+  state.span = span;
+  const p = loadPrefs();
+  p.span = span;
+  savePrefs(p);
+  for (const b of $("ranges").querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.span) === span));
+  }
+  loadHistory();
+}
 
 /* ==================================================================
    Tooltip
@@ -635,7 +771,8 @@ function applyAppearance(prefs) {
 
   // Tiles cache no colour, but the map reads its hues from CSS at paint
   // time, so it has to be redrawn when the palette underneath changes.
-  if (state.model) {
+  if (state.tab === "perf") renderPerf();
+  else if (state.model) {
     renderMap(state.model);
     renderList(state.model);
   }
@@ -651,17 +788,37 @@ function setMetric(metric) {
 function apply(model) {
   state.model = model;
   renderSummary(model);
-  renderMap(model);
-  renderList(model);
+  // Drawing a hidden view is wasted work, and the treemap in particular
+  // measures a zero-width container and lays out nothing.
+  if (state.tab === "apps") {
+    renderMap(model);
+    renderList(model);
+  }
   if (state.selected) renderDetail();
 }
 
+/* Anything that throws in a callback would otherwise vanish: the page keeps
+   running with stale content and no indication that it stopped updating.
+   Twice now that turned a one-line bug into a hunt. */
+function wireErrorReporting() {
+  window.addEventListener("error", (e) =>
+    fail(`${e.message} — ${String(e.filename).split("/").pop()}:${e.lineno}`));
+  window.addEventListener("unhandledrejection", (e) =>
+    fail(`Unhandled: ${e.reason?.message || e.reason}`));
+}
+
 function wire() {
+  wireErrorReporting();
   $("metric-cpu").onclick = () => setMetric("cpu");
   $("metric-mem").onclick = () => setMetric("mem");
   $("detail-close").onclick = closeDetail;
   $("crumb-back").onclick = drillOut;
   $("crumb-root").onclick = drillOut;
+  $("tab-apps").onclick = () => setTab("apps");
+  $("tab-perf").onclick = () => setTab("perf");
+  for (const b of $("ranges").querySelectorAll("button")) {
+    b.onclick = () => setSpan(Number(b.dataset.span));
+  }
 
   $("toggle-translucent").onclick = () => {
     const p = loadPrefs();
@@ -708,18 +865,29 @@ function wire() {
   let raf;
   window.addEventListener("resize", () => {
     cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(() => state.model && renderMap(state.model));
+    raf = requestAnimationFrame(() => {
+      if (state.tab === "perf") renderPerf();
+      else if (state.model) renderMap(state.model);
+    });
   });
 }
 
 async function start() {
   wire();
-  applyAppearance(loadPrefs());
+  const prefs = loadPrefs();
+  applyAppearance(prefs);
 
-  if (!tauri()) {
+  const api = tauri();
+  if (!api) {
     fail("The Tauri bridge is not present on the page.");
     return;
   }
+
+  // Subscribe before anything else is awaited. Live data is the one thing the
+  // window cannot do without, and putting the subscription last meant a single
+  // slow command upstream left the view frozen on its placeholders with no
+  // indication anything was wrong.
+  await api.event.listen("snapshot", (e) => apply(e.payload));
 
   const info = await invoke("machine_info");
   if (info) state.cpuCount = info.cpuCount || 1;
@@ -727,8 +895,19 @@ async function start() {
   const first = await invoke("latest_snapshot");
   if (first) apply(first);
 
-  const api = tauri();
-  if (api) await api.event.listen("snapshot", (e) => apply(e.payload));
+  // Come back to whichever view was last open. Done after the live wiring, so
+  // the history path can never hold up the live path.
+  if (prefs.span) state.span = prefs.span;
+  setSpan(state.span);
+  if (prefs.tab === "perf") setTab("perf", false);
+
+  const status = await invoke("history_status");
+  state.collectorSeen = Boolean(status?.available);
+  if (state.tab === "perf") renderPerf();
+
+  // A slow refresh is plenty for a graph measured in minutes, and keeps the
+  // history query off the once-a-second path.
+  setInterval(() => state.tab === "perf" && loadHistory(), 15000);
 }
 
 start();

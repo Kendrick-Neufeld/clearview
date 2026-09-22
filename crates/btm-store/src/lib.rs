@@ -18,7 +18,7 @@
 //! The result is a few megabytes covering a month, rather than the hundreds a
 //! naive schema would reach.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -101,6 +101,32 @@ impl Store {
         let store = Store { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Opens an existing database for reading only.
+    ///
+    /// The application reads this file while the collector writes it. WAL makes
+    /// that safe, but the reader has no business creating tables or changing
+    /// pragmas, and opening read-only makes that impossible rather than merely
+    /// unlikely.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        Ok(Store { conn })
+    }
+
+    /// Picks the finest resolution that still covers the requested span, so a
+    /// month-long view does not try to draw half a million points.
+    pub fn resolution_for(span_secs: i64) -> u32 {
+        if span_secs <= KEEP_FINE {
+            RES_FINE
+        } else if span_secs <= KEEP_MINUTE {
+            RES_MINUTE
+        } else {
+            RES_COARSE
+        }
     }
 
     fn migrate(&self) -> Result<()> {

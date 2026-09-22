@@ -56,6 +56,13 @@
 
     <div class="banner" id="banner" hidden></div>
 
+    <nav class="tabs" role="tablist">
+      <button class="tab" id="tab-apps" role="tab" aria-selected="true">Applications</button>
+      <button class="tab" id="tab-perf" role="tab" aria-selected="false">Performance</button>
+    </nav>
+
+    <div class="view" id="view-apps">
+
     <!-- The treemap is the hero: area is usage, so the biggest block is the
          answer before a single word is read. -->
     <section class="map-section">
@@ -85,6 +92,49 @@
       </div>
       <div class="list-scroll" id="list"></div>
     </section>
+    </div>
+
+    <div class="view" id="view-perf" hidden>
+      <div class="section-head" style="padding:var(--s-5) var(--s-6) 0">
+        <div>
+          <span class="section-title">Over time</span>
+          <span class="section-note" id="perf-note"></span>
+        </div>
+        <div class="controls" id="ranges" role="group" aria-label="Time range">
+          <button class="toggle" data-span="3600" aria-pressed="true">Hour</button>
+          <button class="toggle" data-span="86400" aria-pressed="false">Day</button>
+          <button class="toggle" data-span="604800" aria-pressed="false">Week</button>
+          <button class="toggle" data-span="2678400" aria-pressed="false">Month</button>
+        </div>
+      </div>
+
+      <div class="charts">
+        <figure class="chart-card">
+          <figcaption>
+            <span class="chart-title">Processor</span>
+            <span class="chart-note">percent of the whole machine</span>
+          </figcaption>
+          <div class="chart" id="chart-cpu"></div>
+        </figure>
+
+        <figure class="chart-card">
+          <figcaption>
+            <span class="chart-title">Memory in use</span>
+            <span class="chart-note">excluding reclaimable cache</span>
+          </figcaption>
+          <div class="chart" id="chart-mem"></div>
+        </figure>
+
+        <figure class="chart-card">
+          <figcaption>
+            <span class="chart-title">Pressure</span>
+            <span class="chart-note">how long anything spent waiting — the difference between busy and struggling</span>
+          </figcaption>
+          <div class="chart" id="chart-psi"></div>
+          <div class="legend" id="psi-legend"></div>
+        </figure>
+      </div>
+    </div>
   </div>
 
   <aside class="detail" id="detail" data-open="false" aria-hidden="true">
