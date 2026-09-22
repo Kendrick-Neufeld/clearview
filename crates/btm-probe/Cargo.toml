@@ -1,0 +1,14 @@
+[package]
+name = "btm-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reads raw system and per-process metrics from /proc, /sys and cgroups."
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+
+[[bin]]
+name = "btm-dump"
+path = "src/bin/dump.rs"
