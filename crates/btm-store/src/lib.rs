@@ -349,6 +349,25 @@ impl Store {
         rows.collect()
     }
 
+    /// The app that used the most processor in one bucket.
+    ///
+    /// This is what turns "something spiked at 17:32" into "Vesktop spiked at
+    /// 17:32". Per-app rows exist only at minute resolution and coarser, so the
+    /// caller has to round to a bucket that was actually written.
+    pub fn top_app_in_bucket(&self, res: u32, t: i64) -> Result<Option<(String, u16)>> {
+        self.conn
+            .query_row(
+                "SELECT a.name, s.cpu_pm
+                   FROM app_series s JOIN app a ON a.id = s.app_id
+                  WHERE s.res = ?1 AND s.t = ?2
+                  ORDER BY s.cpu_pm DESC
+                  LIMIT 1",
+                params![res, t],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
     /// Row counts per table, for reporting what the history actually costs.
     pub fn stats(&self) -> Result<(i64, i64, i64)> {
         let sys: i64 = self.conn.query_row("SELECT COUNT(*) FROM system_series", [], |r| r.get(0))?;

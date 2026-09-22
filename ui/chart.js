@@ -94,6 +94,9 @@ export function drawChart(host, opts) {
     );
   }
 
+  // Annotations last, so they sit above every line.
+  drawMarkers(parts, opts.markers ?? [], { x, y, w, yMax });
+
   parts.push(
     `<line class="crosshair" x1="0" y1="${PAD.top}" x2="0" y2="${PAD.top + h}" opacity="0"/>`,
   );
@@ -102,6 +105,39 @@ export function drawChart(host, opts) {
     `<svg class="chart-svg" width="${width}" height="${height}" role="img">${parts.join("")}</svg>`;
 
   attachHover(host, { series, x, y, t0, t1, width, height, yFormat });
+}
+
+/* Points out the handful of moments worth pointing at, and names them where
+   there is room. Labels are placed only when they fit and do not collide —
+   a label that overlaps its neighbour is worse than no label, and the list
+   beneath the chart carries every one of them regardless. */
+function drawMarkers(parts, markers, { x, y, w, yMax }) {
+  let lastLabelEnd = -Infinity;
+  for (const m of markers) {
+    const cx = x(m.t);
+    const cy = y(Math.min(m.v, yMax));
+    // A 2px ring in the surface colour keeps the dot legible where it sits on
+    // top of the line it belongs to.
+    parts.push(
+      `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4.5" fill="${m.color}" stroke="var(--surface)" stroke-width="2"/>`,
+    );
+    if (!m.label) continue;
+
+    const width = m.label.length * 6 + 10;
+    const left = cx - width / 2;
+    if (left < lastLabelEnd + 6 || left < PAD.left || left + width > PAD.left + w) continue;
+    lastLabelEnd = left + width;
+
+    const ty = Math.max(PAD.top + 9, cy - 10);
+    parts.push(
+      `<text class="marker-label" x="${cx.toFixed(1)}" y="${ty.toFixed(1)}" text-anchor="middle">${escapeXml(m.label)}</text>`,
+    );
+  }
+}
+
+function escapeXml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]);
 }
 
 /* Crosshair and readout. The hit area is the whole plot, not the 2px line —
@@ -138,7 +174,11 @@ function attachHover(host, ctx) {
     let left = ev.clientX + 14;
     if (left + r.width > window.innerWidth - 8) left = ev.clientX - r.width - 14;
     tip.style.left = `${Math.max(8, left)}px`;
-    tip.style.top = `${Math.max(8, box.top - r.height - 8)}px`;
+
+    // Prefer above the plot, but drop below when there is no room — sitting it
+    // over the controls above the chart is worse than either.
+    const above = box.top - r.height - 8;
+    tip.style.top = `${above >= 8 ? above : Math.min(window.innerHeight - r.height - 8, box.bottom + 8)}px`;
   });
 
   svg.addEventListener("mouseleave", () => {

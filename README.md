@@ -51,6 +51,17 @@ cargo build --release
 | `btm-collector` | Background sampler, a `systemd --user` service. |
 | `btm-app` | Tauri GUI: applications view and performance view. |
 
+## The two kinds of graph
+
+They answer different questions, and neither can answer the other's:
+
+- **Live** — per-second, straight from the running app, about five minutes deep.
+  The only place a short burst is visible at full detail, and the only place a
+  spike can be attributed to the exact second it happened.
+- **Hour / Day / Week / Month** — from the collector's database, which stores at
+  best five-second detail and coarsens with age. This is the only thing that can
+  tell you what happened while the window was shut.
+
 ## What it costs
 
 Measured, not estimated. The collector runs all day for a graph nobody is

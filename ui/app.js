@@ -15,8 +15,10 @@ const state = {
   expanded: new Set(),  // pids whose explanation is open
   cmdlines: new Map(),  // pid -> argv, fetched once
   tab: "apps",          // "apps" | "perf"
-  span: 3600,           // seconds of history shown
+  span: 0,              // seconds of history shown; 0 means the live buffer
   history: [],          // machine series for the current span
+  live: [],             // rolling per-second buffer, newest last
+  spikes: [],           // notable bursts for the current span
 };
 
 const $ = (id) => document.getElementById(id);
@@ -561,55 +563,119 @@ const countDescendants = (n) =>
 const pmPct = (pm) => pm / 10;
 
 async function loadHistory() {
-  const rows = await invoke("system_history", { spanSecs: state.span });
+  if (state.span === 0) {
+    // Nothing to fetch: the live view is the buffer this page has been
+    // filling from the stream.
+    state.history = [];
+    state.spikes = [];
+    renderPerf();
+    return;
+  }
+  const [rows, spikes] = await Promise.all([
+    invoke("system_history", { spanSecs: state.span }),
+    invoke("spikes", { spanSecs: state.span }),
+  ]);
   state.history = rows || [];
+  state.spikes = spikes || [];
   renderPerf();
+}
+
+/* The same outlier rule the backend applies to stored history, run over the
+   live buffer — where the culprit is known per second rather than per minute. */
+function liveSpikes(points) {
+  if (points.length < 12) return [];
+  const sorted = [...points].map((p) => p.cpu).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const q3 = sorted[Math.floor(sorted.length * 0.75)];
+  const spread = Math.max(q3 - median, 3);
+  const threshold = Math.max(median + spread * 3, 20);
+
+  const peaks = [];
+  let run = null;
+  for (const p of points) {
+    if (p.cpu >= threshold) {
+      if (!run || p.cpu > run.cpu) run = p;
+    } else if (run) {
+      peaks.push(run);
+      run = null;
+    }
+  }
+  if (run) peaks.push(run);
+
+  return peaks
+    .sort((a, b) => b.cpu - a.cpu)
+    .slice(0, 6)
+    .sort((a, b) => a.t - b.t)
+    .map((p) => ({ t: p.t, cpu_pm: p.cpu * 10, app: p.app, app_cpu_pm: p.appCpu * 10, app_window: 1 }));
 }
 
 function renderPerf() {
   if (state.tab !== "perf") return;
 
-  const rows = state.history;
-  const status = rows.length
-    ? `${rows.length} readings · one point every ${describeStep(rows)}`
-    : "";
-  $("perf-note").textContent = status ? ` — ${status}` : "";
+  const live = state.span === 0;
+  const rows = live ? state.live : state.history;
+  const spikes = live ? liveSpikes(state.live) : state.spikes;
+  state.shownSpikes = spikes;
 
-  const empty = state.collectorSeen === false
-    ? "No history has been recorded yet. The background collector is what fills these graphs — it may not be installed."
-    : "Nothing recorded for this range yet. The collector writes its first points within a minute of starting.";
+  $("perf-note").textContent = live
+    ? rows.length
+      ? ` — last ${rows.length} second${rows.length === 1 ? "" : "s"}, updating every second`
+      : " — starting"
+    : rows.length
+      ? ` — ${rows.length} readings · one point every ${describeStep(rows)}`
+      : "";
+
+  const empty = live
+    ? "Collecting. The live view builds as the app runs — switch to Hour for what was recorded before now."
+    : state.collectorSeen === false
+      ? "No history has been recorded yet. The background collector is what fills these graphs — it may not be installed."
+      : "Nothing recorded for this range yet. The collector writes its first points within a minute of starting.";
+
+  const cpuPoints = live
+    ? rows.map((r) => [r.t, r.cpu])
+    : rows.map((r) => [r.t, pmPct(r.cpu_pm)]);
 
   drawChart($("chart-cpu"), {
-    series: [{ name: "Processor", color: cssVar("--cat-1"),
-               points: rows.map((r) => [r.t, pmPct(r.cpu_pm)]) }],
+    series: [{ name: "Processor", color: cssVar("--cat-1"), points: cpuPoints }],
     yMax: 100,
     yFormat: (v) => `${Math.round(v)}%`,
     height: 168,
     empty,
+    markers: spikes.map((s) => ({
+      t: s.t,
+      v: pmPct(s.cpu_pm),
+      color: cssVar("--cat-2"),
+      label: s.app || null,
+    })),
   });
 
-  const totalMb = state.model ? state.model.mem.total / (1024 * 1024) : 0;
+  renderSpikes(spikes, live);
+
+  const totalGb = state.model ? state.model.mem.total / 1024 ** 3 : undefined;
   drawChart($("chart-mem"), {
-    series: [{ name: "Memory", color: cssVar("--cat-1"),
-               points: rows.map((r) => [r.t, r.mem_mb / 1024]) }],
-    // Scaled against installed memory, so the line means something absolute
-    // rather than filling the frame whatever the numbers are.
-    yMax: totalMb ? totalMb / 1024 : undefined,
+    series: [{
+      name: "Memory",
+      color: cssVar("--cat-1"),
+      points: live ? rows.map((r) => [r.t, r.memGb]) : rows.map((r) => [r.t, r.mem_mb / 1024]),
+    }],
+    yMax: totalGb,
     yFormat: (v) => `${v.toFixed(0)} GB`,
     height: 168,
     empty,
   });
 
   const psi = [
-    { name: "Processor", color: cssVar("--cat-1"), key: "psi_cpu_pm" },
-    { name: "Memory", color: cssVar("--cat-2"), key: "psi_mem_pm" },
-    { name: "Disk", color: cssVar("--cat-3"), key: "psi_io_pm" },
+    { name: "Processor", color: cssVar("--cat-1"), key: "psi_cpu_pm", i: 0 },
+    { name: "Memory", color: cssVar("--cat-2"), key: "psi_mem_pm", i: 1 },
+    { name: "Disk", color: cssVar("--cat-3"), key: "psi_io_pm", i: 2 },
   ];
   drawChart($("chart-psi"), {
     series: psi.map((p) => ({
       name: p.name,
       color: p.color,
-      points: rows.map((r) => [r.t, pmPct(r[p.key])]),
+      points: live
+        ? rows.map((r) => [r.t, r.psi[p.i]])
+        : rows.map((r) => [r.t, pmPct(r[p.key])]),
     })),
     yMax: 100,
     yFormat: (v) => `${Math.round(v)}%`,
@@ -629,12 +695,49 @@ function renderPerf() {
   }
 }
 
+/* Every spike is listed, whether or not its label fitted on the chart. */
+function renderSpikes(spikes, live) {
+  const host = $("spikes");
+  host.hidden = spikes.length === 0;
+  if (!spikes.length) return;
+
+  const rows = spikes
+    .slice()
+    .sort((a, b) => b.cpu_pm - a.cpu_pm)
+    .map((s) => {
+      const when = new Date(s.t * 1000);
+      const clock = `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+      const who = s.app
+        ? `${escapeHtml(s.app)} <em>— ${fmtPct(pmPct(s.app_cpu_pm))}% of the machine</em>`
+        : `<em>no per-app record for this moment</em>`;
+      return `<div class="spike-row">
+        <span class="spike-time">${clock}</span>
+        <span class="spike-value">${fmtPct(pmPct(s.cpu_pm))}%</span>
+        <span class="spike-app">${who}</span>
+      </div>`;
+    })
+    .join("");
+
+  // Say how the attribution was made. Matching a five-second spike against a
+  // one-minute average is a reasonable inference, not a measurement, and
+  // presenting it as certainty would be the wrong kind of confident.
+  const window = spikes[0]?.app_window ?? 60;
+  const note = live
+    ? "Measured at the moment of each spike."
+    : `Attributed to the busiest app in the surrounding ${
+        window >= 600 ? "ten minutes" : "minute"
+      } — the finest per-app detail kept this far back. Use Live for exact attribution.`;
+
+  host.innerHTML = `<div class="spikes-head">Biggest bursts</div>${rows}<div class="spike-note">${note}</div>`;
+}
+
 function describeStep(rows) {
   if (rows.length < 2) return "sample";
   const step = rows[1].t - rows[0].t;
-  if (step < 60) return `${step} seconds`;
-  if (step < 3600) return `${Math.round(step / 60)} minutes`;
-  return `${Math.round(step / 3600)} hours`;
+  const unit = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (step < 60) return unit(step, "second");
+  if (step < 3600) return unit(Math.round(step / 60), "minute");
+  return unit(Math.round(step / 3600), "hour");
 }
 
 function setTab(tab, remember = true) {
@@ -785,8 +888,34 @@ function setMetric(metric) {
   if (state.model) renderMap(state.model);
 }
 
+/* Roughly five minutes of per-second readings. The database cannot hold this
+   resolution — five seconds is its finest — so the live view is the only place
+   a short burst is visible at the moment it happens. */
+const LIVE_CAPACITY = 300;
+
+function recordLive(model) {
+  const cpus = state.cpuCount || 1;
+  // The top app is captured at the instant of the sample, so a live spike is
+  // attributed exactly rather than to whoever dominated the surrounding minute.
+  const top = model.apps.find((a) => a.kind !== "Kernel") || model.apps[0];
+  state.live.push({
+    t: Math.floor(Date.now() / 1000),
+    cpu: (model.cpu_busy ?? 0) * 100,
+    memGb: (model.mem.total - model.mem.available) / 1024 ** 3,
+    psi: [
+      model.pressure.cpu?.some.avg10 ?? 0,
+      model.pressure.memory?.some.avg10 ?? 0,
+      model.pressure.io?.some.avg10 ?? 0,
+    ],
+    app: top?.name ?? null,
+    appCpu: top ? (top.totals.cpu_cores / cpus) * 100 : 0,
+  });
+  if (state.live.length > LIVE_CAPACITY) state.live.shift();
+}
+
 function apply(model) {
   state.model = model;
+  recordLive(model);
   renderSummary(model);
   // Drawing a hidden view is wasted work, and the treemap in particular
   // measures a zero-width container and lays out nothing.
@@ -795,6 +924,8 @@ function apply(model) {
     renderList(model);
   }
   if (state.selected) renderDetail();
+  // The live view is driven by the stream itself, not by a timer.
+  if (state.tab === "perf" && state.span === 0) renderPerf();
 }
 
 /* Anything that throws in a callback would otherwise vanish: the page keeps
@@ -907,7 +1038,8 @@ async function start() {
 
   // A slow refresh is plenty for a graph measured in minutes, and keeps the
   // history query off the once-a-second path.
-  setInterval(() => state.tab === "perf" && loadHistory(), 15000);
+  // Stored history refreshes slowly; the live view is driven by the stream.
+  setInterval(() => state.tab === "perf" && state.span !== 0 && loadHistory(), 15000);
 }
 
 start();

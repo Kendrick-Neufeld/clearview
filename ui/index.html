@@ -101,7 +101,8 @@
           <span class="section-note" id="perf-note"></span>
         </div>
         <div class="controls" id="ranges" role="group" aria-label="Time range">
-          <button class="toggle" data-span="3600" aria-pressed="true">Hour</button>
+          <button class="toggle" data-span="0" aria-pressed="true">Live</button>
+          <button class="toggle" data-span="3600" aria-pressed="false">Hour</button>
           <button class="toggle" data-span="86400" aria-pressed="false">Day</button>
           <button class="toggle" data-span="604800" aria-pressed="false">Week</button>
           <button class="toggle" data-span="2678400" aria-pressed="false">Month</button>
@@ -115,6 +116,7 @@
             <span class="chart-note">percent of the whole machine</span>
           </figcaption>
           <div class="chart" id="chart-cpu"></div>
+          <div class="spikes" id="spikes" hidden></div>
         </figure>
 
         <figure class="chart-card">

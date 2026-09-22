@@ -75,6 +75,90 @@ async fn app_history(
     }))
 }
 
+/// One notable burst of processor use, with whatever caused it.
+#[derive(serde::Serialize)]
+struct Spike {
+    t: i64,
+    cpu_pm: u16,
+    /// The app that used most processor in the bucket containing the spike.
+    /// `None` when no per-app row covers it — early in a session, or for a
+    /// spike older than the per-app retention window.
+    app: Option<String>,
+    app_cpu_pm: u16,
+    /// Seconds the per-app figure is averaged over. A five-second spike matched
+    /// against a one-minute average is an attribution, not a measurement, and
+    /// the interface says so rather than implying more precision than exists.
+    app_window: u32,
+}
+
+/// Finds the processor spikes worth pointing at, and names the likely culprit.
+///
+/// Marking every bump would be noise; a chart littered with labels is one
+/// nobody reads. Only clear outliers survive, and only the largest handful of
+/// those are returned.
+#[tauri::command]
+async fn spikes(span_secs: i64, state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<Spike>, ()> {
+    let res = Store::resolution_for(span_secs);
+    let series = with_history(&state, |store, now| {
+        store.system_series(res, now - span_secs, now)
+    });
+    if series.len() < 8 {
+        return Ok(Vec::new());
+    }
+
+    // A median baseline rather than a mean: the spikes themselves would drag a
+    // mean upward and hide the smaller ones.
+    let mut sorted: Vec<u16> = series.iter().map(|p| p.cpu_pm).collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    // Distance from the median to the upper quartile stands in for spread, and
+    // unlike a standard deviation it is not inflated by the outliers.
+    let q3 = sorted[sorted.len() * 3 / 4];
+    let spread = (q3.saturating_sub(median)).max(30);
+    let threshold = (median as u32 + spread as u32 * 3).max(200) as u16;
+
+    // Group runs of consecutive points over the threshold, keeping each run's
+    // peak: one burst should produce one mark, not fifteen.
+    let mut peaks: Vec<btm_store::SystemPoint> = Vec::new();
+    let mut run: Option<btm_store::SystemPoint> = None;
+    for p in &series {
+        if p.cpu_pm >= threshold {
+            if run.is_none_or(|best| p.cpu_pm > best.cpu_pm) {
+                run = Some(*p);
+            }
+        } else if let Some(best) = run.take() {
+            peaks.push(best);
+        }
+    }
+    if let Some(best) = run.take() {
+        peaks.push(best);
+    }
+
+    peaks.sort_unstable_by_key(|p| std::cmp::Reverse(p.cpu_pm));
+    peaks.truncate(6);
+
+    // Per-app rows are never written at the finest resolution.
+    let app_res = res.max(btm_store::RES_MINUTE);
+    let bucket = app_res as i64;
+    let mut out: Vec<Spike> = peaks
+        .into_iter()
+        .map(|p| {
+            let aligned = (p.t / bucket) * bucket;
+            let found = with_history(&state, |store, _| {
+                store.top_app_in_bucket(app_res, aligned).map(|o| o.into_iter().collect())
+            });
+            let (app, app_cpu_pm) = match found.into_iter().next() {
+                Some((name, cpu)) => (Some(name), cpu),
+                None => (None, 0),
+            };
+            Spike { t: p.t, cpu_pm: p.cpu_pm, app, app_cpu_pm, app_window: app_res }
+        })
+        .collect();
+
+    out.sort_unstable_by_key(|s| s.t);
+    Ok(out)
+}
+
 /// Whether any history exists yet, so the interface can explain an empty graph
 /// instead of just showing one.
 #[tauri::command]
@@ -142,7 +226,8 @@ fn main() {
             machine_info,
             system_history,
             app_history,
-            history_status
+            history_status,
+            spikes
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

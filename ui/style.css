@@ -865,3 +865,59 @@ body {
 }
 
 .spark svg { display: block; }
+
+/* A spike label names the cause right where it happened. Text wears an ink
+   token, never the series colour — the dot beside it carries identity. */
+.chart-svg .marker-label {
+  fill: var(--ink-secondary);
+  font-size: 10px;
+  font-family: var(--sans);
+  font-weight: 500;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.spikes {
+  margin-top: var(--s-3);
+  border-top: 1px solid var(--hairline);
+  padding-top: var(--s-3);
+}
+
+.spikes-head {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: var(--s-2);
+}
+
+.spike-row {
+  display: grid;
+  grid-template-columns: 62px 56px 1fr;
+  gap: var(--s-3);
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.spike-time { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+
+.spike-value {
+  color: var(--ink);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.spike-app { color: var(--ink-secondary); }
+
+.spike-app em { color: var(--ink-muted); font-style: normal; }
+
+.spike-note {
+  font-size: 11px;
+  color: var(--ink-muted);
+  margin-top: var(--s-2);
+  text-wrap: pretty;
+}
