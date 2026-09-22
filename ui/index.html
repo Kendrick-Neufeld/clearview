@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clearview</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Summary. Utilisation and pressure sit together, because one says how
+         hard the machine is working and only the other says whether that is
+         a problem. -->
+    <header class="summary">
+      <div class="stat">
+        <div class="stat-label">Processor</div>
+        <div class="stat-value num"><span id="cpu-value">—</span><span class="unit">%</span></div>
+        <div class="stat-sub" id="cpu-sub">of the whole machine</div>
+        <div class="cores" id="cores" aria-hidden="true"></div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-label">Memory</div>
+        <div class="stat-value num"><span id="mem-value">—</span><span class="unit" id="mem-unit">GB</span></div>
+        <div class="stat-sub" id="mem-sub">in use</div>
+      </div>
+
+      <div class="stat" style="min-width:200px">
+        <div class="stat-label">Health</div>
+        <div class="verdict" id="verdict" data-level="good" style="margin-top:6px">
+          <span class="verdict-dot"></span>
+          <span id="verdict-text">Waiting for a second reading…</span>
+        </div>
+        <div class="stat-sub" id="verdict-sub"></div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-label">Running</div>
+        <div class="stat-value num" id="app-count">—</div>
+        <div class="stat-sub" id="proc-count">processes</div>
+      </div>
+    </header>
+
+    <!-- The treemap is the hero: area is usage, so the biggest block is the
+         answer before a single word is read. -->
+    <section class="map-section">
+      <div class="section-head">
+        <div>
+          <span class="section-title" id="map-title">What is using this machine</span>
+          <span class="section-note" id="map-note"></span>
+        </div>
+        <div class="controls" role="group" aria-label="Metric">
+          <button class="toggle" id="metric-cpu" aria-pressed="true">Processor</button>
+          <button class="toggle" id="metric-mem" aria-pressed="false">Memory</button>
+        </div>
+      </div>
+      <div class="map" id="map">
+        <div class="map-empty" id="map-empty">Measuring…</div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <section class="list-section">
+      <div class="section-head" style="margin-top:var(--s-2)">
+        <span class="section-title">Applications</span>
+        <span class="section-note">Grouped properly — one row per app, not per process</span>
+      </div>
+      <div class="list-scroll" id="list"></div>
+    </section>
+  </div>
+
+  <aside class="detail" id="detail" data-open="false" aria-hidden="true">
+    <button class="close" id="detail-close" aria-label="Close">✕</button>
+    <div class="detail-head">
+      <h2 class="detail-title" id="detail-title"></h2>
+      <div class="detail-sub" id="detail-sub"></div>
+    </div>
+    <div class="detail-body" id="detail-body"></div>
+  </aside>
+
+  <div class="tip" id="tip" role="tooltip" data-show="false"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

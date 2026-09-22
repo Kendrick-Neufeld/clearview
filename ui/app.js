@@ -1,0 +1,613 @@
+import { squarify, foldTail } from "./treemap.js";
+
+/* ==================================================================
+   State
+   ================================================================== */
+
+const state = {
+  model: null,
+  cpuCount: 1,
+  metric: "cpu",     // "cpu" | "mem"
+  drilledApp: null,  // app id when viewing inside one app
+  selected: null,
+  tiles: new Map(),  // key -> element, so tiles tween instead of flashing
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* ==================================================================
+   Formatting
+   ================================================================== */
+
+const fmtPct = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+
+function fmtBytes(b) {
+  if (b >= 1024 ** 3) return { value: (b / 1024 ** 3).toFixed(1), unit: "GB" };
+  if (b >= 1024 ** 2) return { value: (b / 1024 ** 2).toFixed(0), unit: "MB" };
+  return { value: (b / 1024).toFixed(0), unit: "KB" };
+}
+
+const bytesText = (b) => {
+  const { value, unit } = fmtBytes(b);
+  return `${value} ${unit}`;
+};
+
+const cpuPct = (usage) => (usage.cpu_cores / state.cpuCount) * 100;
+
+/* ==================================================================
+   Colour
+
+   Three categorical slots, read live from CSS so a theme change is
+   picked up without touching this file. Colour encodes what *kind*
+   of software a block is — not its size, which the area already
+   says, and not which app it is, which the label says.
+   ================================================================== */
+
+const KIND_SLOT = { Gui: "--cat-1", System: "--cat-2", Kernel: "--cat-2", Background: "--cat-3" };
+
+const KIND_LABEL = {
+  Gui: "Your apps",
+  System: "System services",
+  Kernel: "System services",
+  Background: "Background",
+};
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+const colorForKind = (kind) => cssVar(KIND_SLOT[kind] || "--cat-3");
+
+/* Chooses ink or white for a label sitting on a colour fill, so text
+   inside a tile always clears contrast regardless of the hue. */
+function inkOn(hex) {
+  const m = hex.replace("#", "");
+  const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  return L > 0.45 ? "#0b0b0b" : "#ffffff";
+}
+
+/* ==================================================================
+   Summary
+   ================================================================== */
+
+function renderSummary(m) {
+  const busy = (m.cpu_busy ?? 0) * 100;
+  $("cpu-value").textContent = fmtPct(busy);
+  $("cpu-sub").textContent = `of ${state.cpuCount} threads`;
+
+  renderCores(m.per_cpu_busy || []);
+
+  const used = m.mem.total - m.mem.available;
+  const { value, unit } = fmtBytes(used);
+  $("mem-value").textContent = value;
+  $("mem-unit").textContent = unit;
+  $("mem-sub").textContent =
+    `of ${bytesText(m.mem.total)} · ${bytesText(m.mem.cached + m.mem.sreclaimable)} cache`;
+
+  const real = m.apps.filter((a) => a.kind !== "Kernel");
+  $("app-count").textContent = real.length;
+  $("proc-count").textContent =
+    `${m.apps.reduce((a, b) => a + b.process_count, 0)} processes`;
+
+  renderVerdict(m, busy);
+}
+
+/* Sequential ramp: one hue, light to dark with magnitude. */
+function renderCores(cores) {
+  const host = $("cores");
+  while (host.children.length < cores.length) {
+    const d = document.createElement("div");
+    d.className = "core";
+    host.appendChild(d);
+  }
+  while (host.children.length > cores.length) host.lastChild.remove();
+
+  const steps = ["--seq-100", "--seq-250", "--seq-400", "--seq-550", "--seq-700"];
+  cores.forEach((busy, i) => {
+    const el = host.children[i];
+    if (busy < 0.02) {
+      el.style.background = "var(--surface-sunk)";
+    } else {
+      const step = Math.min(steps.length - 1, Math.floor(busy * steps.length));
+      el.style.background = `var(${steps[step]})`;
+    }
+    el.title = `Core ${i}: ${fmtPct(busy * 100)}%`;
+  });
+}
+
+/* The distinction no mainstream monitor draws: a machine can be fully
+   busy and perfectly healthy. Pressure, not utilisation, is what says
+   whether anything is actually being held up. */
+function renderVerdict(m, busyPct) {
+  const cpuP = m.pressure.cpu?.some.avg10 ?? 0;
+  const memP = m.pressure.memory?.some.avg10 ?? 0;
+  const ioP = m.pressure.io?.some.avg10 ?? 0;
+
+  let level = "good";
+  let text = "Running comfortably";
+  let sub = "";
+
+  if (memP > 10) {
+    level = "critical";
+    text = "Short of memory";
+    sub = "Programs are waiting on memory — this is what makes a machine feel stuck.";
+  } else if (cpuP > 20) {
+    level = "serious";
+    text = "Competing for the processor";
+    sub = "More work is ready to run than there are cores to run it.";
+  } else if (ioP > 20) {
+    level = "warning";
+    text = "Waiting on the disk";
+    sub = "Programs are held up reading or writing, not by the processor.";
+  } else if (busyPct > 70) {
+    text = "Working hard, but keeping up";
+    sub = "High usage with nothing queuing — the machine is being used, not struggling.";
+  } else {
+    sub = "Nothing is waiting on the processor, memory or disk.";
+  }
+
+  $("verdict").dataset.level = level;
+  $("verdict-text").textContent = text;
+  $("verdict-sub").textContent = sub;
+}
+
+/* ==================================================================
+   Treemap
+   ================================================================== */
+
+function valueOf(usage) {
+  return state.metric === "cpu" ? usage.cpu_cores : usage.mem_pss;
+}
+
+const valueText = (usage) =>
+  state.metric === "cpu" ? `${fmtPct(cpuPct(usage))}%` : bytesText(usage.mem_pss);
+
+/* Flattens an app's process tree for the drill-down view. Self usage is
+   used, not subtree, so nothing is counted twice inside one picture. */
+function flattenProcs(nodes, out = []) {
+  for (const n of nodes) {
+    out.push(n);
+    flattenProcs(n.children, out);
+  }
+  return out;
+}
+
+function mapItems(m) {
+  if (state.drilledApp) {
+    const app = m.apps.find((a) => a.id === state.drilledApp);
+    if (!app) {
+      state.drilledApp = null;
+      return mapItems(m);
+    }
+    const procs = flattenProcs(app.roots).map((p) => ({
+      id: `p${p.pid}`,
+      name: p.window_title || p.comm,
+      sub: p.role.label,
+      why: p.role.explanation,
+      value: valueOf(p.self_usage),
+      kind: app.kind,
+      node: p,
+    }));
+    return { items: foldTail(procs, 28, "Smaller helpers"), app };
+  }
+
+  const apps = m.apps
+    .filter((a) => valueOf(a.totals) > 0)
+    .map((a) => ({
+      id: a.id,
+      name: a.name,
+      sub: `${a.process_count} process${a.process_count === 1 ? "" : "es"}`,
+      value: valueOf(a.totals),
+      kind: a.kind,
+      app: a,
+    }));
+  return { items: foldTail(apps, 24), app: null };
+}
+
+function renderMap(m) {
+  const host = $("map");
+  const { items, app } = mapItems(m);
+  const rect = host.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) return;
+
+  $("map-empty").style.display = items.length ? "none" : "grid";
+
+  $("map-title").textContent = app ? app.name : "What is using this machine";
+  $("map-note").textContent = app
+    ? " — its processes. Click the background to go back."
+    : state.metric === "cpu"
+      ? " — block size is processor time"
+      : " — block size is memory";
+
+  const laid = squarify(items, rect.width, rect.height);
+  const seen = new Set();
+
+  for (const t of laid) {
+    seen.add(t.id);
+    let el = state.tiles.get(t.id);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "tile";
+      el.tabIndex = 0;
+      el.innerHTML = `<div class="tile-label"><span class="tile-name"></span><span class="tile-value num"></span></div>`;
+      host.appendChild(el);
+      state.tiles.set(t.id, el);
+    }
+
+    // A 2px gap in the surface colour separates tiles. A border would
+    // add ink that is not data.
+    el.style.left = `${t.x + 1}px`;
+    el.style.top = `${t.y + 1}px`;
+    el.style.width = `${Math.max(0, t.w - 2)}px`;
+    el.style.height = `${Math.max(0, t.h - 2)}px`;
+
+    const fill = t.isOther ? cssVar("--surface-sunk") : colorForKind(t.kind);
+    el.style.background = fill;
+    el.style.color = t.isOther ? cssVar("--ink-secondary") : inkOn(fill);
+
+    // Labels are placed only where they genuinely fit — never clipped.
+    const nameEl = el.querySelector(".tile-name");
+    const valEl = el.querySelector(".tile-value");
+    const roomForName = t.w >= 54 && t.h >= 26;
+    const roomForValue = t.w >= 54 && t.h >= 42;
+    nameEl.textContent = roomForName ? t.name : "";
+    valEl.textContent = roomForValue
+      ? `${t.isOther ? `${t.count} items · ` : ""}${t.value !== undefined && !t.isOther ? valueTextFor(t) : ""}`
+      : "";
+
+    el._tile = t;
+  }
+
+  for (const [id, el] of state.tiles) {
+    if (!seen.has(id)) {
+      el.remove();
+      state.tiles.delete(id);
+    }
+  }
+
+  renderLegend(app);
+}
+
+function valueTextFor(t) {
+  if (t.node) return valueText(t.node.self_usage);
+  if (t.app) return valueText(t.app.totals);
+  return "";
+}
+
+/* A legend is always present when more than one colour is in play, so
+   identity never rests on colour-matching alone. Inside one app every
+   tile shares a hue, so the legend would restate the title. */
+function renderLegend(app) {
+  const host = $("legend");
+  host.innerHTML = "";
+  if (app) return;
+
+  const kinds = new Set(
+    (state.model?.apps || []).filter((a) => valueOf(a.totals) > 0).map((a) => a.kind),
+  );
+  const order = ["Gui", "Background", "System", "Kernel"];
+  const seenLabels = new Set();
+
+  for (const k of order) {
+    if (!kinds.has(k) || seenLabels.has(KIND_LABEL[k])) continue;
+    seenLabels.add(KIND_LABEL[k]);
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch"></span><span>${KIND_LABEL[k]}</span>`;
+    item.querySelector(".legend-swatch").style.background = colorForKind(k);
+    host.appendChild(item);
+  }
+}
+
+/* ==================================================================
+   Application list
+   ================================================================== */
+
+function renderList(m) {
+  const host = $("list");
+  const apps = m.apps.filter((a) => a.kind !== "Kernel").slice(0, 60);
+  host.innerHTML = "";
+
+  for (const a of apps) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.setAttribute("aria-selected", String(state.selected === a.id));
+
+    const sub = a.windows[0] || subtitleFor(a);
+    const est = a.totals.mem_estimated ? "~" : "";
+
+    row.innerHTML = `
+      <div class="row-name">
+        <span class="row-dot"></span>
+        <div style="min-width:0">
+          <div class="row-title"></div>
+          <div class="row-sub"></div>
+        </div>
+      </div>
+      <div class="row-num num"><strong>${fmtPct(cpuPct(a.totals))}</strong>%</div>
+      <div class="row-num num">${est}${bytesText(a.totals.mem_pss)}</div>
+      <div class="row-procs num">${a.process_count} proc${a.process_count === 1 ? "" : "s"}</div>`;
+
+    row.querySelector(".row-dot").style.background = colorForKind(a.kind);
+    row.querySelector(".row-title").textContent = a.name;
+    row.querySelector(".row-sub").textContent = sub;
+    row.onclick = () => openDetail(a.id);
+    host.appendChild(row);
+  }
+}
+
+function subtitleFor(a) {
+  if (a.kind === "System") return "System service";
+  if (a.kind === "Background") return "Background";
+  // Say so when the grouping rests on a weak signal rather than
+  // presenting a guess with the same confidence as a fact.
+  return a.identified_by === "Executable" ? "Unrecognised program" : "No window open";
+}
+
+/* ==================================================================
+   Detail panel
+   ================================================================== */
+
+function openDetail(appId) {
+  state.selected = appId;
+  renderDetail();
+  $("detail").dataset.open = "true";
+  $("detail").setAttribute("aria-hidden", "false");
+}
+
+function closeDetail() {
+  state.selected = null;
+  $("detail").dataset.open = "false";
+  $("detail").setAttribute("aria-hidden", "true");
+  if (state.model) renderList(state.model);
+}
+
+function renderDetail() {
+  const m = state.model;
+  if (!m || !state.selected) return;
+  const app = m.apps.find((a) => a.id === state.selected);
+  if (!app) return closeDetail();
+
+  $("detail-title").textContent = app.name;
+  $("detail-sub").textContent =
+    app.windows[0] || `${KIND_LABEL[app.kind]} · ${app.process_count} processes`;
+
+  const over = app.totals.mem_rss - app.totals.mem_pss;
+  const body = $("detail-body");
+  body.innerHTML = "";
+
+  body.appendChild(
+    html(`<div class="facts">
+      <div><div class="fact-label">Processor</div><div class="fact-value num">${fmtPct(cpuPct(app.totals))}%</div></div>
+      <div><div class="fact-label">Memory</div><div class="fact-value num">${bytesText(app.totals.mem_pss)}</div></div>
+      <div><div class="fact-label">Processes</div><div class="fact-value num">${app.process_count}</div></div>
+      <div><div class="fact-label">Windows</div><div class="fact-value num">${app.windows.length}</div></div>
+    </div>`),
+  );
+
+  // The memory correction, stated plainly, because it is large and
+  // nothing else the user has run tells them about it.
+  if (app.process_count > 1 && over > 64 * 1024 * 1024) {
+    body.appendChild(
+      html(`<div class="note">These ${app.process_count} processes share a lot of memory between them.
+      The real cost is <strong>${bytesText(app.totals.mem_pss)}</strong>; adding up each process
+      separately, as most task managers do, would report ${bytesText(app.totals.mem_rss)}.</div>`),
+    );
+  }
+
+  const composition = countRoles(app.roots);
+  if (app.process_count > 1) {
+    const parts = [...composition.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, n]) => `${n} × ${label.toLowerCase()}`)
+      .join(", ");
+    body.appendChild(html(`<div class="note">Made up of ${parts}.</div>`));
+  }
+
+  body.appendChild(html(`<div class="subhead">Processes</div>`));
+  for (const root of app.roots) renderProc(root, body, 0);
+}
+
+function countRoles(nodes, acc = new Map()) {
+  for (const n of nodes) {
+    acc.set(n.role.label, (acc.get(n.role.label) || 0) + 1);
+    countRoles(n.children, acc);
+  }
+  return acc;
+}
+
+function renderProc(node, host, depth) {
+  const el = document.createElement("div");
+  el.className = "proc";
+  el.style.paddingLeft = `${depth * 12}px`;
+
+  const own = cpuPct(node.self_usage);
+  const sub = cpuPct(node.subtree_usage);
+  const hasKids = node.children.length > 0;
+
+  // Both figures, always. The subtree total is the honest headline, and
+  // showing the process's own beside it is what stops an idle-looking
+  // parent from reading as a bug.
+  const cpuText = hasKids
+    ? `${fmtPct(sub)}%<span style="color:var(--ink-muted)"> · ${fmtPct(own)}% own</span>`
+    : `${fmtPct(own)}%`;
+
+  el.innerHTML = `
+    <div class="proc-main">
+      <span class="proc-name"></span>
+      <span class="proc-role"></span>
+      <span class="proc-cpu num">${cpuText}</span>
+    </div>`;
+
+  el.querySelector(".proc-name").textContent = node.window_title || node.comm;
+  el.querySelector(".proc-role").textContent = node.role.label;
+
+  // Quiet inline explanation — the single sentence that answers the
+  // question this whole project started from.
+  if (node.self_usage.cpu_cores < 0.02 && sub - own > 5 / state.cpuCount) {
+    const n = countDescendants(node);
+    el.appendChild(
+      html(`<div class="proc-hint">Idle itself — the work is in the ${n} process${n === 1 ? "" : "es"} below it.</div>`),
+    );
+  }
+
+  // The longer "why does this exist" is one click away, so the list
+  // stays scannable.
+  el.querySelector(".proc-main").style.cursor = "pointer";
+  el.querySelector(".proc-main").onclick = async () => {
+    if (el.querySelector(".proc-why")) {
+      el.querySelector(".proc-why")?.remove();
+      el.querySelector(".proc-cmd")?.remove();
+      return;
+    }
+    el.appendChild(html(`<div class="proc-why">${escapeHtml(node.role.explanation)}</div>`));
+    const cmd = await invoke("process_cmdline", { pid: node.pid });
+    if (cmd?.length) {
+      el.appendChild(html(`<div class="proc-cmd">${escapeHtml(cmd.join(" ").slice(0, 400))}</div>`));
+    }
+  };
+
+  host.appendChild(el);
+  for (const c of node.children) renderProc(c, host, depth + 1);
+}
+
+const countDescendants = (n) =>
+  n.children.reduce((a, c) => a + 1 + countDescendants(c), 0);
+
+/* ==================================================================
+   Tooltip
+   ================================================================== */
+
+const tip = () => $("tip");
+
+function showTip(t, ev) {
+  const el = tip();
+  const name = t.name;
+  const value = valueTextFor(t);
+  const why = t.why ? `<div class="tip-why">${escapeHtml(t.why)}</div>` : "";
+  const extra = t.isOther ? `<div class="tip-row">${t.count} smaller items combined</div>` : "";
+  el.innerHTML = `<div class="tip-title">${escapeHtml(name)}</div>
+    <div class="tip-row">${escapeHtml(t.sub || "")}${value ? ` · ${value}` : ""}</div>${extra}${why}`;
+  el.dataset.show = "true";
+  moveTip(ev);
+}
+
+function moveTip(ev) {
+  const el = tip();
+  const pad = 14;
+  const r = el.getBoundingClientRect();
+  let x = ev.clientX + pad;
+  let y = ev.clientY + pad;
+  if (x + r.width > window.innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > window.innerHeight - 8) y = ev.clientY - r.height - pad;
+  el.style.left = `${Math.max(8, x)}px`;
+  el.style.top = `${Math.max(8, y)}px`;
+}
+
+const hideTip = () => { tip().dataset.show = "false"; };
+
+/* ==================================================================
+   Wiring
+   ================================================================== */
+
+function html(markup) {
+  const t = document.createElement("template");
+  t.innerHTML = markup.trim();
+  return t.content.firstElementChild;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+const tauri = () => window.__TAURI__;
+
+async function invoke(cmd, args) {
+  try {
+    return await tauri().core.invoke(cmd, args);
+  } catch {
+    return null;
+  }
+}
+
+function setMetric(metric) {
+  state.metric = metric;
+  $("metric-cpu").setAttribute("aria-pressed", String(metric === "cpu"));
+  $("metric-mem").setAttribute("aria-pressed", String(metric === "mem"));
+  if (state.model) renderMap(state.model);
+}
+
+function apply(model) {
+  state.model = model;
+  renderSummary(model);
+  renderMap(model);
+  renderList(model);
+  if (state.selected) renderDetail();
+}
+
+function wire() {
+  $("metric-cpu").onclick = () => setMetric("cpu");
+  $("metric-mem").onclick = () => setMetric("mem");
+  $("detail-close").onclick = closeDetail;
+
+  const map = $("map");
+  map.addEventListener("click", (ev) => {
+    const tileEl = ev.target.closest(".tile");
+    if (!tileEl) {
+      // Clicking the background steps back out of a drill-down.
+      if (state.drilledApp) {
+        state.drilledApp = null;
+        if (state.model) renderMap(state.model);
+      }
+      return;
+    }
+    const t = tileEl._tile;
+    if (t.isOther) return;
+    if (t.app) {
+      state.drilledApp = t.app.id;
+      openDetail(t.app.id);
+      renderMap(state.model);
+    }
+  });
+
+  map.addEventListener("mousemove", (ev) => {
+    const tileEl = ev.target.closest(".tile");
+    if (!tileEl) return hideTip();
+    showTip(tileEl._tile, ev);
+  });
+  map.addEventListener("mouseleave", hideTip);
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (state.drilledApp) {
+      state.drilledApp = null;
+      if (state.model) renderMap(state.model);
+    } else {
+      closeDetail();
+    }
+  });
+
+  let raf;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => state.model && renderMap(state.model));
+  });
+}
+
+async function start() {
+  wire();
+  const info = await invoke("machine_info");
+  if (info) state.cpuCount = info.cpuCount || 1;
+
+  const first = await invoke("latest_snapshot");
+  if (first) apply(first);
+
+  const api = tauri();
+  if (api) await api.event.listen("snapshot", (e) => apply(e.payload));
+}
+
+start();
