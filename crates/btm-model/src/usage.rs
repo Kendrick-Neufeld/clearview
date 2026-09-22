@@ -16,19 +16,21 @@ pub struct Usage {
     pub mem_rss: u64,
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,
-    /// Set when any contributing process had no PSS reading and its RSS was
-    /// substituted, so the interface can mark the total as approximate rather than
-    /// quietly presenting a guess as a measurement.
-    pub mem_estimated: bool,
+    /// Bytes in this total that came from RSS because no PSS reading was
+    /// available. Kept as a quantity rather than a flag: with hundreds of
+    /// processes on a machine, *some* process always misses the sampling window,
+    /// and a boolean would mark every total approximate forever — which trains
+    /// the reader to ignore the mark entirely.
+    pub mem_unmeasured: u64,
 }
 
 impl Usage {
     pub fn of(p: &ProcSample) -> Self {
         // PSS is sampled less often than CPU because it is far more expensive. When
         // it is missing, RSS stands in and the total is flagged as estimated.
-        let (pss, estimated) = match p.mem {
-            Some(m) => (m.pss_bytes, false),
-            None => (p.rss_bytes, true),
+        let (pss, unmeasured) = match p.mem {
+            Some(m) => (m.pss_bytes, 0),
+            None => (p.rss_bytes, p.rss_bytes),
         };
         Usage {
             cpu_cores: p.cpu_cores.unwrap_or(0.0),
@@ -36,8 +38,14 @@ impl Usage {
             mem_rss: p.rss_bytes,
             disk_read_bps: p.disk_read_bps.unwrap_or(0.0),
             disk_write_bps: p.disk_write_bps.unwrap_or(0.0),
-            mem_estimated: estimated,
+            mem_unmeasured: unmeasured,
         }
+    }
+
+    /// Whether enough of this total is substituted for the figure to deserve a
+    /// qualifier. Under a twentieth, the error is smaller than the rounding.
+    pub fn is_approximate(&self) -> bool {
+        self.mem_unmeasured * 20 > self.mem_pss
     }
 
     /// Share of the whole machine, the unit this tool reports by default.
@@ -64,7 +72,7 @@ impl std::ops::AddAssign for Usage {
         self.mem_rss += o.mem_rss;
         self.disk_read_bps += o.disk_read_bps;
         self.disk_write_bps += o.disk_write_bps;
-        self.mem_estimated |= o.mem_estimated;
+        self.mem_unmeasured += o.mem_unmeasured;
     }
 }
 
@@ -88,14 +96,21 @@ mod tests {
             cpu_cores: 0.5,
             mem_pss: 50,
             mem_rss: 200,
-            mem_estimated: true,
+            mem_unmeasured: 50,
             ..Default::default()
         };
         a += b;
         assert_eq!(a.cpu_cores, 1.5);
         assert_eq!(a.mem_pss, 150);
-        // One approximate member makes the whole total approximate.
-        assert!(a.mem_estimated);
         assert_eq!(a.rss_overcount(), 350);
+        // A third of this total is substituted, so it is worth qualifying.
+        assert!(a.is_approximate());
+    }
+
+    #[test]
+    fn a_trivial_substitution_does_not_flag_the_whole_total() {
+        // The common case: a few tiny processes missed the sampling window.
+        let u = Usage { mem_pss: 1_000_000, mem_unmeasured: 2_000, ..Default::default() };
+        assert!(!u.is_approximate());
     }
 }

@@ -308,7 +308,10 @@ function renderLegend(app) {
 
 function renderList(m) {
   const host = $("list");
-  const apps = m.apps.filter((a) => a.kind !== "Kernel").slice(0, 60);
+  // Kernel threads are included here as the single grouped row the model
+  // produces. Their CPU time is real, and hiding it in the list while the
+  // treemap shows it would make the two views disagree.
+  const apps = m.apps.slice(0, 60);
   host.innerHTML = "";
 
   for (const a of apps) {
@@ -317,7 +320,7 @@ function renderList(m) {
     row.setAttribute("aria-selected", String(state.selected === a.id));
 
     const sub = a.windows[0] || subtitleFor(a);
-    const est = a.totals.mem_estimated ? "~" : "";
+    const est = isApproximate(a.totals) ? "~" : "";
 
     row.innerHTML = `
       <div class="row-name">
@@ -339,7 +342,12 @@ function renderList(m) {
   }
 }
 
+/* Mirrors the model's rule: a substituted fraction under a twentieth is
+   smaller than the rounding, so it earns no qualifier. */
+const isApproximate = (u) => u.mem_unmeasured * 20 > u.mem_pss;
+
 function subtitleFor(a) {
+  if (a.kind === "Kernel") return "Kernel threads — part of the operating system";
   if (a.kind === "System") return "System service";
   if (a.kind === "Background") return "Background";
   // Say so when the grouping rests on a weak signal rather than
@@ -529,8 +537,65 @@ const tauri = () => window.__TAURI__;
 async function invoke(cmd, args) {
   try {
     return await tauri().core.invoke(cmd, args);
-  } catch {
+  } catch (err) {
+    // Surface it rather than sitting on "Measuring…" forever. A denied
+    // command usually means a missing capability, which is invisible
+    // otherwise.
+    fail(`Could not reach the backend (${cmd}): ${err}`);
     return null;
+  }
+}
+
+function fail(message) {
+  const el = $("banner");
+  if (!el) return;
+  el.hidden = false;
+  el.innerHTML = `<strong>Something is not connected.</strong> ${escapeHtml(message)}`;
+}
+
+/* ==================================================================
+   Appearance
+
+   Both settings are per-viewer conveniences, so localStorage is the
+   right home for them; every access is guarded because it throws
+   outright in some contexts.
+   ================================================================== */
+
+const PREFS = "clearview.appearance";
+
+function loadPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs(p) {
+  try {
+    localStorage.setItem(PREFS, JSON.stringify(p));
+  } catch {
+    /* a read-only store is not worth failing over */
+  }
+}
+
+function applyAppearance(prefs) {
+  const root = document.documentElement;
+  if (prefs.translucent) root.dataset.translucent = "true";
+  else delete root.dataset.translucent;
+
+  if (prefs.theme === "light") root.dataset.theme = "light";
+  else delete root.dataset.theme;
+
+  $("toggle-translucent").setAttribute("aria-pressed", String(!!prefs.translucent));
+  $("toggle-theme").setAttribute("aria-pressed", String(prefs.theme === "light"));
+  $("toggle-theme").textContent = prefs.theme === "light" ? "Dark" : "Light";
+
+  // Tiles cache no colour, but the map reads its hues from CSS at paint
+  // time, so it has to be redrawn when the palette underneath changes.
+  if (state.model) {
+    renderMap(state.model);
+    renderList(state.model);
   }
 }
 
@@ -553,6 +618,20 @@ function wire() {
   $("metric-cpu").onclick = () => setMetric("cpu");
   $("metric-mem").onclick = () => setMetric("mem");
   $("detail-close").onclick = closeDetail;
+
+  $("toggle-translucent").onclick = () => {
+    const p = loadPrefs();
+    p.translucent = !p.translucent;
+    savePrefs(p);
+    applyAppearance(p);
+  };
+
+  $("toggle-theme").onclick = () => {
+    const p = loadPrefs();
+    p.theme = p.theme === "light" ? "dark" : "light";
+    savePrefs(p);
+    applyAppearance(p);
+  };
 
   const map = $("map");
   map.addEventListener("click", (ev) => {
@@ -600,6 +679,13 @@ function wire() {
 
 async function start() {
   wire();
+  applyAppearance(loadPrefs());
+
+  if (!tauri()) {
+    fail("The Tauri bridge is not present on the page.");
+    return;
+  }
+
   const info = await invoke("machine_info");
   if (info) state.cpuCount = info.cpuCount || 1;
 

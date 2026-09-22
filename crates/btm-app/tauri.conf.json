@@ -14,7 +14,9 @@
         "height": 780,
         "minWidth": 720,
         "minHeight": 520,
-        "decorations": true
+        "decorations": true,
+        "label": "main",
+        "transparent": true
       }
     ],
     "security": {

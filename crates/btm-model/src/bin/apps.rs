@@ -91,7 +91,7 @@ fn header(m: &SystemModel, db: &DesktopDb) {
 }
 
 fn print_app(app: &App, expand: bool) {
-    let est = if app.totals.mem_estimated { "~" } else { "" };
+    let est = if app.totals.is_approximate() { "~" } else { "" };
     println!(
         "  {:<26} {:>6.1}%  {}{:>9}   {} process{}{}",
         truncate(&app.name, 26),

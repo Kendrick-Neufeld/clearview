@@ -1,43 +1,49 @@
 /* ===================================================================
    Design tokens.
 
-   Light is defined on bare :root; dark redefines only what changes,
-   under both the OS media query and an explicit theme stamp so a
-   future toggle can win in either direction. No colour is ever
-   defined *only* inside a media query.
+   Dark is the default and is defined on bare :root — this is a
+   dark-first design, not a light one inverted. Light is an opt-in
+   stamp. No colour is ever defined only inside a media query.
+
+   Translucency is a separate axis from theme: [data-translucent]
+   swaps the surface tokens for alpha versions. Only the backdrop
+   loses opacity; anything carrying text stays at 0.8 or above so
+   contrast survives whatever wallpaper is behind the window.
    =================================================================== */
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
 
   /* Surfaces ------------------------------------------------------ */
-  --plane:        #f9f9f7;   /* the page behind everything */
-  --surface:      #fcfcfb;   /* panels and the chart ground */
-  --surface-sunk: #f2f1ed;   /* wells, track backgrounds */
+  --plane:        #0d0d0d;   /* the page behind everything */
+  --surface:      #1a1a19;   /* panels and the chart ground */
+  --surface-sunk: #232321;   /* wells, track backgrounds */
 
   /* Ink ----------------------------------------------------------- */
-  --ink:           #0b0b0b;
-  --ink-secondary: #52514e;
+  --ink:           #ffffff;
+  --ink-secondary: #c3c2b7;
   --ink-muted:     #898781;
 
   /* Lines --------------------------------------------------------- */
-  --hairline: #e1e0d9;
-  --baseline: #c3c2b7;
-  --ring:     rgba(11, 11, 11, 0.10);
+  --hairline: #2c2c2a;
+  --baseline: #383835;
+  --ring:     rgba(255, 255, 255, 0.10);
 
   /* Categorical slots. Three only: a treemap is an all-pairs form,
      where any two tiles can end up adjacent, and three is the number
-     that stays distinguishable under colour-blindness there. */
-  --cat-1: #2a78d6;  /* your apps       */
-  --cat-2: #eb6834;  /* system          */
-  --cat-3: #1baf7a;  /* background      */
+     that stays distinguishable under colour-blindness there. These
+     are the dark-surface steps, validated against #1a1a19. */
+  --cat-1: #3987e5;  /* your apps       */
+  --cat-2: #d95926;  /* system          */
+  --cat-3: #199e70;  /* background      */
 
-  /* Sequential ramp, for magnitude (the per-core heatmap). */
-  --seq-100: #cde2fb;
-  --seq-250: #86b6ef;
+  /* Sequential ramp, for magnitude (the per-core heatmap). Anchored
+     for dark: near-zero recedes toward the surface. */
+  --seq-100: #0d366b;
+  --seq-250: #1c5cab;
   --seq-400: #3987e5;
-  --seq-550: #1c5cab;
-  --seq-700: #0d366b;
+  --seq-550: #86b6ef;
+  --seq-700: #cde2fb;
 
   /* Status. Reserved meanings, never reused as a series colour, and
      always shipped with a label rather than standing on hue alone. */
@@ -67,48 +73,40 @@
   --dur: 240ms;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --plane:        #0d0d0d;
-    --surface:      #1a1a19;
-    --surface-sunk: #232321;
-    --ink:           #ffffff;
-    --ink-secondary: #c3c2b7;
-    --ink-muted:     #898781;
-    --hairline: #2c2c2a;
-    --baseline: #383835;
-    --ring:     rgba(255, 255, 255, 0.10);
-    --cat-1: #3987e5;
-    --cat-2: #d95926;
-    --cat-3: #199e70;
-    --seq-100: #0d366b;
-    --seq-250: #1c5cab;
-    --seq-400: #3987e5;
-    --seq-550: #86b6ef;
-    --seq-700: #cde2fb;
-  }
+/* Translucent, dark. The plane goes furthest; panels stay mostly
+   opaque so text never has to compete with a wallpaper. */
+:root[data-translucent="true"] {
+  --plane:        rgba(13, 13, 13, 0.58);
+  --surface:      rgba(26, 26, 25, 0.82);
+  --surface-sunk: rgba(35, 35, 33, 0.82);
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --plane:        #0d0d0d;
-  --surface:      #1a1a19;
-  --surface-sunk: #232321;
-  --ink:           #ffffff;
-  --ink-secondary: #c3c2b7;
+/* Light, opt-in ---------------------------------------------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --plane:        #f9f9f7;
+  --surface:      #fcfcfb;
+  --surface-sunk: #f2f1ed;
+  --ink:           #0b0b0b;
+  --ink-secondary: #52514e;
   --ink-muted:     #898781;
-  --hairline: #2c2c2a;
-  --baseline: #383835;
-  --ring:     rgba(255, 255, 255, 0.10);
-  --cat-1: #3987e5;
-  --cat-2: #d95926;
-  --cat-3: #199e70;
-  --seq-100: #0d366b;
-  --seq-250: #1c5cab;
+  --hairline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --ring:     rgba(11, 11, 11, 0.10);
+  --cat-1: #2a78d6;
+  --cat-2: #eb6834;
+  --cat-3: #1baf7a;
+  --seq-100: #cde2fb;
+  --seq-250: #86b6ef;
   --seq-400: #3987e5;
-  --seq-550: #86b6ef;
-  --seq-700: #cde2fb;
+  --seq-550: #1c5cab;
+  --seq-700: #0d366b;
+}
+
+:root[data-theme="light"][data-translucent="true"] {
+  --plane:        rgba(249, 249, 247, 0.58);
+  --surface:      rgba(252, 252, 251, 0.82);
+  --surface-sunk: rgba(242, 241, 237, 0.82);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -125,6 +123,8 @@ html, body {
   height: 100%;
   margin: 0;
 }
+
+html { background: transparent; }
 
 body {
   background: var(--plane);
@@ -153,12 +153,27 @@ body {
 .summary {
   display: flex;
   align-items: flex-start;
-  gap: var(--s-7);
+  justify-content: space-between;
+  gap: var(--s-5);
   padding: var(--s-5) var(--s-6) var(--s-4);
   border-bottom: 1px solid var(--hairline);
   background: var(--surface);
-  flex-wrap: wrap;
 }
+
+/* The stats wrap among themselves; the view controls stay pinned to the
+   end rather than being flung onto a line of their own. */
+.stats {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-6);
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.view-controls { flex: none; text-align: right; }
+
+.view-controls .controls { margin-top: var(--s-2); }
 
 .stat { min-width: 108px; }
 
@@ -188,6 +203,13 @@ body {
   font-size: 11px;
   color: var(--ink-muted);
   margin-top: var(--s-1);
+}
+
+/* The health explanation is a full sentence; without a cap it sets the
+   width of the whole bar and pushes the last stat onto its own line. */
+#verdict-sub {
+  max-width: 236px;
+  text-wrap: pretty;
 }
 
 /* The health verdict. Utilisation says how hard the machine is
@@ -636,3 +658,16 @@ body {
   padding-top: var(--s-2);
   border-top: 1px solid var(--hairline);
 }
+
+/* A failure has to be visible. Sitting forever on "Measuring…" hides
+   the problem instead of reporting it. */
+.banner {
+  margin: 0;
+  padding: var(--s-3) var(--s-6);
+  background: var(--surface-sunk);
+  border-bottom: 1px solid var(--hairline);
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.banner strong { color: var(--ink); font-weight: 500; }

@@ -12,6 +12,7 @@
          hard the machine is working and only the other says whether that is
          a problem. -->
     <header class="summary">
+      <div class="stats">
       <div class="stat">
         <div class="stat-label">Processor</div>
         <div class="stat-value num"><span id="cpu-value">—</span><span class="unit">%</span></div>
@@ -39,7 +40,21 @@
         <div class="stat-value num" id="app-count">—</div>
         <div class="stat-sub" id="proc-count">processes</div>
       </div>
+
+      </div>
+
+      <div class="view-controls">
+        <div class="stat-label">View</div>
+        <div class="controls" style="margin-top:6px">
+          <button class="toggle" id="toggle-translucent" aria-pressed="false"
+                  title="See your desktop through the window">Transparent</button>
+          <button class="toggle" id="toggle-theme" aria-pressed="false"
+                  title="Switch to the light theme">Light</button>
+        </div>
+      </div>
     </header>
+
+    <div class="banner" id="banner" hidden></div>
 
     <!-- The treemap is the hero: area is usage, so the biggest block is the
          answer before a single word is read. -->
