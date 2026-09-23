@@ -592,14 +592,23 @@ pub fn default_path() -> std::path::PathBuf {
 mod tests {
     use super::*;
 
+    /// Deletes a database and both of its sidecars.
+    ///
+    /// WAL mode keeps `-wal` and `-shm` beside the file. Removing only the
+    /// `.db` left those behind, so every test run quietly littered the
+    /// temporary directory.
+    pub(super) fn remove_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     /// Tests run in parallel inside one process, so the fixture needs a name
     /// of its own or they fight over the same file.
     fn temp_store(name: &str) -> (Store, std::path::PathBuf) {
         let path =
             std::env::temp_dir().join(format!("btm-test-{}-{name}.db", std::process::id()));
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
+        remove_db(&path);
         (Store::open(&path).unwrap(), path)
     }
 
@@ -621,7 +630,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "an open bucket must not be written early");
         assert_eq!(rows[0].t, 0);
         assert_eq!(rows[0].cpu_pm, 100);
-        let _ = std::fs::remove_file(path);
+        remove_db(&path);
     }
 
     #[test]
@@ -653,7 +662,7 @@ mod tests {
         assert!(written <= APPS_PER_BUCKET * 2);
         let kept = store.app_series("hoarder", RES_MINUTE, 0, 1000).unwrap();
         assert_eq!(kept.len(), 1, "a memory-heavy app must not be dropped for idling");
-        let _ = std::fs::remove_file(path);
+        remove_db(&path);
     }
 
     #[test]
@@ -680,7 +689,7 @@ mod tests {
         let (_, app_rows, names) = store.stats().unwrap();
         assert_eq!(app_rows, 0);
         assert_eq!(names, 0, "a name with no rows left is dead weight");
-        let _ = std::fs::remove_file(path);
+        remove_db(&path);
     }
 }
 
@@ -698,9 +707,7 @@ mod capacity {
     #[ignore]
     fn steady_state_size() {
         let path = std::env::temp_dir().join("btm-capacity.db");
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
+        crate::tests::remove_db(&path);
         let mut store = Store::open(&path).unwrap();
 
         let now: i64 = 1_800_000_000;
@@ -785,6 +792,6 @@ mod capacity {
             "history grew to {:.1} MB, which is no longer lightweight",
             bytes as f64 / 1024.0 / 1024.0
         );
-        let _ = std::fs::remove_file(&path);
+        crate::tests::remove_db(&path);
     }
 }
