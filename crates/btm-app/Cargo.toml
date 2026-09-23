@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "The desktop application."
 
+# The binary name becomes the Wayland app id, which is what a launcher matches
+# against StartupWMClass. Left as "btm-app" the window had no icon anywhere.
+[[bin]]
+name = "clearview"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

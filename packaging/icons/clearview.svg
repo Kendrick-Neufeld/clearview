@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-label="Clearview">
+  <title>Clearview</title>
+
+  <!-- The mark is the app: a treemap where area is what something is using.
+       Three blocks rather than a faithful many-block layout, because below
+       about 24px anything finer collapses into noise. The proportions are a
+       real treemap's — one dominant block and a descending tail — so it reads
+       as this app rather than as a generic grid.
+
+       Margins are tight on purpose: at 16px a generous inset leaves the blocks
+       looking scattered rather than like one object. -->
+
+  <rect width="512" height="512" rx="114" fill="#17171b"/>
+
+  <!-- Dominant block, left. -->
+  <rect x="58" y="58" width="212" height="396" rx="18" fill="#2a78d6"/>
+
+  <!-- The tail, right. -->
+  <rect x="288" y="58" width="166" height="190" rx="18" fill="#1baf7a"/>
+  <rect x="288" y="266" width="166" height="188" rx="18" fill="#eb6834"/>
+</svg>

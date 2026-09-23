@@ -41,6 +41,19 @@ cargo build --release
         4236    vesktop              0.4%           Audio
 ```
 
+## Installing
+
+```bash
+cargo build --release
+./packaging/install.sh
+```
+
+Puts `clearview` on your PATH, adds it to your application menu with its icon,
+and enables the background collector. Everything lands under `$HOME`; nothing
+needs root. The binary is named `clearview` because that name becomes the
+Wayland app id, which is what a launcher matches against `StartupWMClass` — with
+any other name the window gets no icon anywhere.
+
 ## Layout
 
 | Crate | Role |

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Clearview
+GenericName=System Monitor
+Comment=See what your computer is actually doing
+Exec=clearview
+Icon=clearview
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;processes;cpu;memory;ram;monitor;performance;system;
+# Must match the binary name, which is what the compositor reports as the
+# window's app id. Without it the window gets no icon in a taskbar.
+StartupWMClass=clearview

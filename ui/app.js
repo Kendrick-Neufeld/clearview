@@ -71,15 +71,31 @@ function cssVar(name) {
 
 const colorForKind = (kind) => cssVar(KIND_SLOT[kind] || "--cat-3");
 
-/* Chooses ink or white for a label sitting on a colour fill, so text
-   inside a tile always clears contrast regardless of the hue. */
-function inkOn(hex) {
+/* Chooses ink or white for a label sitting on a colour fill.
+ *
+ * Compares the actual contrast of both against the fill and takes the better
+ * one. An earlier version thresholded on the fill's luminance instead, which
+ * got every single palette colour wrong: white on the light green measured
+ * 2.82:1, under the 4.5:1 a label needs, where dark ink gives 6.99:1. A
+ * mid-luminance fill is exactly where a threshold guesses and a comparison
+ * does not have to. */
+function relativeLuminance(hex) {
   const m = hex.replace("#", "");
   const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
   const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
   const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-  const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-  return L > 0.45 ? "#0b0b0b" : "#ffffff";
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+function contrastRatio(a, b) {
+  const [la, lb] = [relativeLuminance(a), relativeLuminance(b)];
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+function inkOn(hex) {
+  const ink = "#0b0b0b";
+  const white = "#ffffff";
+  return contrastRatio(hex, ink) >= contrastRatio(hex, white) ? ink : white;
 }
 
 /* ==================================================================
