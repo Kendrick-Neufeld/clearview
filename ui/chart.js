@@ -9,7 +9,11 @@
  * like, which is why they are never used here.
  */
 
-// The left gutter has to fit the widest y label; 46px clipped "100 KB/s".
+import { axisGutter, segmentByGaps } from "./lib.js";
+
+// The left gutter is sized per chart from the labels it will actually draw: a
+// fixed width clipped "195.3 MB/s" down to "95.3", and the axis then read as
+// non-monotonic, which is worse than no axis at all.
 const PAD = { top: 10, right: 12, bottom: 20, left: 58 };
 
 /** Rounds an axis maximum up to a clean 1 / 2 / 5 × 10ⁿ step. */
@@ -60,20 +64,27 @@ export function drawChart(host, opts) {
   const { max: autoMax, step } = niceTicks(opts.yMax ?? peak);
   const yMax = opts.yMax ?? autoMax;
 
-  const w = width - PAD.left - PAD.right;
+  // Work out every label first, so the gutter can be sized to fit them.
+  const ticks = [];
+  for (let v = 0; v <= yMax + 1e-9; v += step) {
+    if (v > yMax) break;
+    ticks.push(v);
+  }
+  const left = axisGutter(ticks.map((v) => yFormat(v, yMax)));
+
+  const w = width - left - PAD.right;
   const h = height - PAD.top - PAD.bottom;
-  const x = (t) => PAD.left + ((t - t0) / span) * w;
+  const x = (t) => left + ((t - t0) / span) * w;
   const y = (v) => PAD.top + h - (Math.min(v, yMax) / yMax) * h;
 
   const parts = [];
 
   // Gridlines and y labels first, so every mark sits above them.
-  for (let v = 0; v <= yMax + 1e-9; v += step) {
-    if (v > yMax) break;
+  for (const v of ticks) {
     const gy = y(v).toFixed(1);
     parts.push(
-      `<line class="grid" x1="${PAD.left}" y1="${gy}" x2="${PAD.left + w}" y2="${gy}"/>`,
-      `<text class="tick" x="${PAD.left - 8}" y="${gy}" text-anchor="end" dominant-baseline="middle">${yFormat(v, yMax)}</text>`,
+      `<line class="grid" x1="${left}" y1="${gy}" x2="${left + w}" y2="${gy}"/>`,
+      `<text class="tick" x="${left - 8}" y="${gy}" text-anchor="end" dominant-baseline="middle">${yFormat(v, yMax)}</text>`,
     );
   }
 
@@ -87,20 +98,27 @@ export function drawChart(host, opts) {
     );
   }
 
+  const base = (PAD.top + h).toFixed(1);
   for (const s of series) {
-    const pts = s.points.filter((p) => Number.isFinite(p[1]));
-    if (pts.length < 2) continue;
-    const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(" ");
-    // The wash is a fill under the line, never a saturated block.
-    const base = (PAD.top + h).toFixed(1);
-    parts.push(
-      `<path d="${d} L${x(pts.at(-1)[0]).toFixed(1)},${base} L${x(pts[0][0]).toFixed(1)},${base} Z" fill="${s.color}" opacity="0.10"/>`,
-      `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`,
-    );
+    const usable = s.points.filter((p) => Number.isFinite(p[1]));
+    // Drawn as one path per unbroken run. Joining across a stretch with no
+    // samples would assert the value moved smoothly through it, which is how
+    // a machine that was switched off overnight came to show a steady climb.
+    for (const run of segmentByGaps(usable)) {
+      if (run.length < 2) continue;
+      const d = run
+        .map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`)
+        .join(" ");
+      // The wash is a fill under the line, never a saturated block.
+      parts.push(
+        `<path d="${d} L${x(run.at(-1)[0]).toFixed(1)},${base} L${x(run[0][0]).toFixed(1)},${base} Z" fill="${s.color}" opacity="0.10"/>`,
+        `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`,
+      );
+    }
   }
 
   // Annotations last, so they sit above every line.
-  drawMarkers(parts, opts.markers ?? [], { x, y, w, yMax });
+  drawMarkers(parts, opts.markers ?? [], { x, y, w, yMax, left });
 
   parts.push(
     `<line class="crosshair" x1="0" y1="${PAD.top}" x2="0" y2="${PAD.top + h}" opacity="0"/>`,
@@ -109,14 +127,14 @@ export function drawChart(host, opts) {
   host.innerHTML =
     `<svg class="chart-svg" width="${width}" height="${height}" role="img">${parts.join("")}</svg>`;
 
-  attachHover(host, { series, x, y, t0, t1, width, height, yFormat });
+  attachHover(host, { series, x, y, t0, t1, width, height, yFormat, left });
 }
 
 /* Points out the handful of moments worth pointing at, and names them where
    there is room. Labels are placed only when they fit and do not collide —
    a label that overlaps its neighbour is worse than no label, and the list
    beneath the chart carries every one of them regardless. */
-function drawMarkers(parts, markers, { x, y, w, yMax }) {
+function drawMarkers(parts, markers, { x, y, w, yMax, left }) {
   let lastLabelEnd = -Infinity;
   for (const m of markers) {
     const cx = x(m.t);
@@ -129,9 +147,9 @@ function drawMarkers(parts, markers, { x, y, w, yMax }) {
     if (!m.label) continue;
 
     const width = m.label.length * 6 + 10;
-    const left = cx - width / 2;
-    if (left < lastLabelEnd + 6 || left < PAD.left || left + width > PAD.left + w) continue;
-    lastLabelEnd = left + width;
+    const start = cx - width / 2;
+    if (start < lastLabelEnd + 6 || start < left || start + width > left + w) continue;
+    lastLabelEnd = start + width;
 
     const ty = Math.max(PAD.top + 9, cy - 10);
     parts.push(
@@ -156,7 +174,7 @@ function attachHover(host, ctx) {
   svg.addEventListener("mousemove", (ev) => {
     const box = svg.getBoundingClientRect();
     const px = ev.clientX - box.left;
-    const frac = (px - PAD.left) / (ctx.width - PAD.left - PAD.right);
+    const frac = (px - ctx.left) / (ctx.width - ctx.left - PAD.right);
     const t = ctx.t0 + Math.max(0, Math.min(1, frac)) * (ctx.t1 - ctx.t0);
 
     cross.setAttribute("x1", ctx.x(t).toFixed(1));

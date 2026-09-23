@@ -137,7 +137,19 @@ async fn spikes(
                 let found = with_history(&state, |store, _| {
                     store.biggest_grower(app_res, before, aligned).map(|o| o.into_iter().collect())
                 });
-                match found.into_iter().next() {
+                // Naming the largest riser is only worth doing when that rise
+                // actually accounts for something. Without this an app that
+                // grew by nothing was still credited with a multi-gigabyte
+                // jump, and the row read "grew by 0.0 GB" beside "+6.7 GB".
+                // Most of a system-wide increase is often cache or a program
+                // that started from nothing, neither of which any existing app
+                // row can explain.
+                let credible = found
+                    .into_iter()
+                    .next()
+                    .filter(|(_, grew)| *grew * 5 >= growth);
+
+                match credible {
                     Some((name, grew)) => Spike {
                         t: p.t,
                         value: growth,

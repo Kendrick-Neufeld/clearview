@@ -180,3 +180,62 @@ test("an empty filter returns the tree untouched", () => {
   const tree = [node(1, "a", "Main")];
   assert.equal(filterTree(tree, "  "), tree);
 });
+
+/* ── Gaps ────────────────────────────────────────────────────────────── */
+
+import { axisGutter, segmentByGaps } from "./lib.js";
+
+const evenly = (n, step = 60, from = 0) =>
+  Array.from({ length: n }, (_, i) => [from + i * step, i]);
+
+test("an unbroken series stays in one piece", () => {
+  const points = evenly(20);
+  const parts = segmentByGaps(points);
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].length, 20);
+});
+
+test("a machine switched off overnight leaves a hole, not a diagonal", () => {
+  // The real shape: samples every minute, then 7.5 hours of nothing, then more.
+  const before = evenly(30, 60, 0);
+  const after = evenly(30, 60, 30 * 60 + 7.5 * 3600);
+  const parts = segmentByGaps([...before, ...after]);
+  assert.equal(parts.length, 2, "the two sessions must not be joined");
+  assert.equal(parts[0].length, 30);
+  assert.equal(parts[1].length, 30);
+});
+
+test("a single missed sample does not split the line", () => {
+  // evenly(10) ends at t=540. One dropped sample means the next lands at 660,
+  // a 120s gap where 60s is expected — within tolerance, so the line holds.
+  const points = [...evenly(10), [660, 99], [720, 98]];
+  assert.equal(segmentByGaps(points).length, 1);
+});
+
+test("a sustained outage does split the line", () => {
+  // Several minutes with nothing recorded is a real absence, not a hiccup,
+  // and joining across it would assert a value nobody measured.
+  const points = [...evenly(10), [540 + 600, 99], [540 + 660, 98]];
+  assert.equal(segmentByGaps(points).length, 2);
+});
+
+test("the expected spacing comes from the median, not the first gap", () => {
+  // A long gap first, then a steady minute cadence. A naive implementation
+  // takes the first gap as normal and then splits everywhere.
+  const points = [[0, 1], [3600, 2], ...evenly(20, 60, 3660)];
+  const parts = segmentByGaps(points);
+  assert.equal(parts.length, 2, "only the leading hour-long gap should split");
+  assert.equal(parts[1].length, 21);
+});
+
+test("degenerate series do not throw", () => {
+  assert.deepEqual(segmentByGaps([]), []);
+  assert.deepEqual(segmentByGaps([[5, 1]]), [[[5, 1]]]);
+});
+
+test("the axis gutter grows with the longest label", () => {
+  const narrow = axisGutter(["0%", "50%", "100%"]);
+  const wide = axisGutter(["0.0 MB/s", "48.8 MB/s", "195.3 MB/s"]);
+  assert.ok(wide > narrow, "a wider label must reserve more room");
+  assert.ok(wide >= "195.3 MB/s".length * 6, `${wide}px cannot hold "195.3 MB/s"`);
+});

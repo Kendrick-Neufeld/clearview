@@ -182,3 +182,51 @@ export function filterTree(nodes, query) {
   };
   return nodes.map(keep).filter(Boolean);
 }
+
+/* ── Gaps in a series ────────────────────────────────────────────────── */
+
+/* Splits a series wherever samples are missing.
+ *
+ * A line chart joins consecutive points, which quietly asserts that the value
+ * moved smoothly between them. When the machine was switched off there are no
+ * samples at all, and joining across that hole drew a clean diagonal from the
+ * last reading before shutdown to the first after boot — a graph showing the
+ * processor climbing steadily overnight on a machine that was unplugged.
+ *
+ * The data was right; the drawing invented the part in between. Splitting on
+ * gaps leaves the hole empty, which is what actually happened.
+ *
+ * The expected spacing is taken from the median of the gaps rather than the
+ * first one, so a single missing sample at the start cannot set the scale. */
+export function segmentByGaps(points, { tolerance = 2.5 } = {}) {
+  if (points.length < 2) return points.length ? [points] : [];
+
+  const steps = [];
+  for (let i = 1; i < points.length; i += 1) steps.push(points[i][0] - points[i - 1][0]);
+  const sorted = [...steps].sort((a, b) => a - b);
+  const expected = sorted[Math.floor(sorted.length / 2)] || 0;
+  if (expected <= 0) return [points];
+
+  const limit = expected * tolerance;
+  const out = [];
+  let run = [points[0]];
+  for (let i = 1; i < points.length; i += 1) {
+    if (points[i][0] - points[i - 1][0] > limit) {
+      out.push(run);
+      run = [];
+    }
+    run.push(points[i]);
+  }
+  if (run.length) out.push(run);
+  return out;
+}
+
+/* Width to reserve for the y-axis labels.
+ *
+ * A fixed gutter clipped wide values: a disk axis topping out at 195.3 MB/s
+ * rendered as "95.3", and the axis then read as non-monotonic, which is worse
+ * than useless. Sized from the longest label the axis will actually draw. */
+export function axisGutter(labels, { charWidth = 6.2, padding = 14, min = 34 } = {}) {
+  const longest = labels.reduce((n, l) => Math.max(n, String(l).length), 0);
+  return Math.max(min, Math.ceil(longest * charWidth + padding));
+}

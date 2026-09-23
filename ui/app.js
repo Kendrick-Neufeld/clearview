@@ -953,6 +953,7 @@ function renderPerf() {
   renderSpikes($("spikes-mem"), memSpikes, {
     live,
     heading: "Biggest increases",
+    unattributed: "no single app accounts for this — usually cache, or something that started up",
     format: (v) => `+${(live ? v : v / 1024).toFixed(1)} GB`,
     appFormat: (v) => `grew by ${(v / 1024).toFixed(1)} GB`,
     note: live
@@ -1226,7 +1227,7 @@ function renderSpikes(host, spikes, opts) {
       const clock = `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
       const who = s.app
         ? `${escapeHtml(s.app)} <em>— ${opts.appFormat(s.app_value)}</em>`
-        : `<em>no per-app record for this moment</em>`;
+        : `<em>${escapeHtml(opts.unattributed || "no per-app record for this moment")}</em>`;
       return `<div class="spike-row">
         <span class="spike-time">${clock}</span>
         <span class="spike-value">${opts.format(s.value)}</span>
