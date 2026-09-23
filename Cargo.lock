@@ -185,6 +185,7 @@ dependencies = [
  "btm-model",
  "btm-probe",
  "btm-store",
+ "glib",
  "serde",
  "serde_json",
  "tauri",

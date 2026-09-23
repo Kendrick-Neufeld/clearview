@@ -350,6 +350,18 @@ async fn machine_info() -> serde_json::Value {
 }
 
 fn main() {
+    // Pin the program name before any GTK initialisation.
+    //
+    // On Wayland the window's app id comes from glib's program name, which is
+    // derived from argv[0]. Run directly that is "clearview" and everything
+    // matches; run from an AppImage, linuxdeploy's wrapper hands over a
+    // different argv[0] and the window comes up as "Clearview" instead. The
+    // desktop entry can only name one of them, so whichever it named, the
+    // other launch method lost its taskbar icon. Setting it explicitly makes
+    // the launch method irrelevant.
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("clearview"));
+
     let state = Arc::new(AppState {
         latest: Mutex::new(None),
         // Opened lazily: the collector may be installed after the window is.
