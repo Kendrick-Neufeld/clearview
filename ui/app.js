@@ -22,6 +22,7 @@ const state = {
   query: "",            // list filter text
   procQuery: "",        // filter within the selected app's processes
   showHistory: false,   // per-app history charts, collapsed by default
+  detailShell: null,    // which app the panel's stable parts were built for
   sort: "cpu",          // "cpu" | "mem" | "name"
   heldOrder: null,      // app ids, frozen while the pointer is in the list
   heldLayout: null,     // tile rectangles, frozen while the pointer is in the map
@@ -427,11 +428,21 @@ function openDetail(appId) {
 
 function closeDetail() {
   state.selected = null;
+  state.detailShell = null;
   $("detail").dataset.open = "false";
   $("detail").setAttribute("aria-hidden", "true");
   if (state.model) renderList(state.model);
 }
 
+/* The panel refreshes on the one-second tick, and rebuilding all of it
+ * destroyed two things that have to survive that.
+ *
+ * The filter field was recreated every second, so focus and the caret went
+ * with it — the field could not actually be typed into. And the history charts
+ * were redrawn from scratch each time, which read as a blink.
+ *
+ * So the panel is built once per application, into containers that are then
+ * left alone, and only the parts whose numbers change are re-rendered. */
 function renderDetail() {
   const m = state.model;
   if (!m || !state.selected) return;
@@ -443,12 +454,58 @@ function renderDetail() {
     app.windows[0] ||
     `${KIND_LABEL[app.kind]} · ${app.process_count} process${app.process_count === 1 ? "" : "es"}`;
 
-  const over = app.totals.mem_rss - app.totals.mem_pss;
-  const body = $("detail-body");
-  const scroll = body.scrollTop;
-  body.innerHTML = "";
+  if (state.detailShell !== app.id) buildDetailShell(app);
 
-  body.appendChild(
+  renderFacts(app);
+  renderActions(app, $("d-actions"));
+  renderProcessList(app);
+}
+
+/** The app the panel is showing, re-read rather than closed over: a handler
+ *  installed once outlives every snapshot that follows it. */
+function currentApp() {
+  return state.model?.apps.find((a) => a.id === state.selected) || null;
+}
+
+function buildDetailShell(app) {
+  state.detailShell = app.id;
+  const body = $("detail-body");
+  body.innerHTML = "";
+  body.scrollTop = 0;
+
+  body.appendChild(html(`<div id="d-facts"></div>`));
+  body.appendChild(html(`<div class="history" id="d-history"></div>`));
+  body.appendChild(html(`<div id="d-actions"></div>`));
+
+  // The process list gets its own filter: an app with thirty processes is a
+  // long scroll, and what is being looked for is usually known by name. Built
+  // here, once, so the tick cannot take it away mid-word.
+  const head = html(
+    `<div class="proc-head">` +
+      `<span class="subhead" style="margin:0">Processes</span>` +
+      `<input class="search proc-search" id="proc-search" type="search" spellcheck="false"` +
+      ` placeholder="Filter processes\u2026" aria-label="Filter processes" /></div>`,
+  );
+  const field = head.querySelector("#proc-search");
+  field.value = state.procQuery;
+  field.addEventListener("input", () => {
+    state.procQuery = field.value;
+    const now = currentApp();
+    // Only the list is redrawn; the field being typed into is left alone.
+    if (now) renderProcessList(now);
+  });
+  body.appendChild(head);
+  body.appendChild(html(`<div id="d-procs"></div>`));
+
+  renderHistory(app);
+}
+
+function renderFacts(app) {
+  const over = app.totals.mem_rss - app.totals.mem_pss;
+  const host = $("d-facts");
+  host.innerHTML = "";
+
+  host.appendChild(
     html(`<div class="facts">
       <div><div class="fact-label">Processor</div><div class="fact-value num">${fmtPct(cpuPct(app.totals))}%</div></div>
       <div><div class="fact-label">Memory</div><div class="fact-value num">${bytesText(app.totals.mem_pss)}</div></div>
@@ -457,28 +514,33 @@ function renderDetail() {
     </div>`),
   );
 
-  // The memory correction, stated plainly, because it is large and
-  // nothing else the user has run tells them about it.
+  // The memory correction, stated plainly, because it is large and nothing
+  // else the user has run tells them about it.
   if (app.process_count > 1 && over > 64 * 1024 * 1024) {
-    body.appendChild(
+    host.appendChild(
       html(`<div class="note">These ${app.process_count} processes share a lot of memory between them.
       The real cost is <strong>${bytesText(app.totals.mem_pss)}</strong>; adding up each process
       separately, as most task managers do, would report ${bytesText(app.totals.mem_rss)}.</div>`),
     );
   }
 
-  const composition = countRoles(app.roots);
   if (app.process_count > 1) {
-    const parts = [...composition.entries()]
+    const parts = [...countRoles(app.roots).entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([label, n]) => `${n} × ${label.toLowerCase()}`)
       .join(", ");
-    body.appendChild(html(`<div class="note">Made up of ${parts}.</div>`));
+    host.appendChild(html(`<div class="note">Made up of ${parts}.</div>`));
   }
+}
 
-  // History is collapsed by default: four charts would push the process list
-  // off the panel, and most visits are about what is happening now.
-  const historyBlock = html(`<div class="history"></div>`);
+/* Drawn when the panel opens and again only when it is toggled. These charts
+ * cover a whole day; one second of new data cannot visibly change them, so
+ * repainting on every tick bought nothing and cost a blink. */
+function renderHistory(app) {
+  const host = $("d-history");
+  if (!host) return;
+  host.innerHTML = "";
+
   const toggle = html(
     `<button class="disclosure" aria-expanded="${state.showHistory}">` +
       `<span class="disclosure-mark">${state.showHistory ? "\u25be" : "\u25b8"}</span>` +
@@ -489,55 +551,37 @@ function renderDetail() {
     const saved = loadPrefs();
     saved.showHistory = state.showHistory;
     savePrefs(saved);
-    renderDetail();
+    const now = currentApp();
+    if (now) renderHistory(now);
   };
-  historyBlock.appendChild(toggle);
-  if (state.showHistory) {
-    historyBlock.appendChild(
-      html(`<div class="sparks">
-        <div class="spark-row"><span class="spark-label">Processor</span><div class="spark" id="spark-cpu"></div></div>
-        <div class="spark-row"><span class="spark-label">Memory</span><div class="spark" id="spark-mem"></div></div>
-        <div class="spark-row"><span class="spark-label">Graphics</span><div class="spark" id="spark-gpu"></div></div>
-        <div class="spark-row"><span class="spark-label">Network</span><div class="spark" id="spark-net"></div></div>
-      </div>`),
-    );
-  }
-  body.appendChild(historyBlock);
-  if (state.showHistory) loadAppSpark(app.id);
+  host.appendChild(toggle);
 
-  renderActions(app, body);
+  if (!state.showHistory) return;
 
-  // The process list gets its own filter: an app with thirty processes is a
-  // long scroll, and what is being looked for is usually known by name.
-  const head = html(
-    `<div class="proc-head">` +
-      `<span class="subhead" style="margin:0">Processes</span>` +
-      `<input class="search proc-search" id="proc-search" type="search" spellcheck="false"` +
-      ` placeholder="Filter processes\u2026" aria-label="Filter processes" /></div>`,
+  host.appendChild(
+    html(`<div class="sparks">
+      <div class="spark-row"><span class="spark-label">Processor</span><div class="spark" id="spark-cpu"></div></div>
+      <div class="spark-row"><span class="spark-label">Memory</span><div class="spark" id="spark-mem"></div></div>
+      <div class="spark-row"><span class="spark-label">Graphics</span><div class="spark" id="spark-gpu"></div></div>
+      <div class="spark-row"><span class="spark-label">Network</span><div class="spark" id="spark-net"></div></div>
+    </div>`),
   );
-  body.appendChild(head);
-  const procSearch = head.querySelector("#proc-search");
-  procSearch.value = state.procQuery;
-  procSearch.addEventListener("input", () => {
-    state.procQuery = procSearch.value;
-    renderDetail();
-    // Redrawing the panel replaces the field, so focus has to be put back.
-    const again = $("proc-search");
-    if (again) {
-      again.focus();
-      again.setSelectionRange(again.value.length, again.value.length);
-    }
-  });
+  loadAppSpark(app.id);
+}
+
+function renderProcessList(app) {
+  const host = $("d-procs");
+  if (!host) return;
+  host.innerHTML = "";
 
   const shown = filterTree(app.roots, state.procQuery);
   if (!shown.length) {
-    body.appendChild(
+    host.appendChild(
       html(`<div class="list-empty">No process matches \u201c${escapeHtml(state.procQuery)}\u201d.</div>`),
     );
+    return;
   }
-  for (const root of shown) renderProc(root, body, 0);
-
-  body.scrollTop = scroll;
+  for (const root of shown) renderProc(root, host, 0);
 }
 
 /* Closing an application.
@@ -547,12 +591,12 @@ function renderDetail() {
  * out, not after. Nothing here force-kills on the first attempt: programs are
  * asked to close so they can save, and forcing is offered separately, only
  * once asking has visibly failed. */
-function renderActions(app, body) {
+function renderActions(app, host) {
+  if (!host) return;
+  host.innerHTML = "";
   const targets = collectTargets(app.roots);
   if (!targets.length) return;
-
-  const host = html(`<div class="actions"></div>`);
-  body.appendChild(host);
+  host.className = "actions";
 
   const ending = state.ending?.appId === app.id ? state.ending : null;
 
@@ -1345,11 +1389,15 @@ function applyAppearance(prefs) {
 
   // Tiles cache no colour, but the map reads its hues from CSS at paint
   // time, so it has to be redrawn when the palette underneath changes.
+  // A palette change has to repaint the charts, which are otherwise never
+  // redrawn once painted.
+  state.detailShell = null;
   if (state.tab === "perf") renderPerf();
   else if (state.model) {
     renderMap(state.model);
     renderList(state.model);
   }
+  if (state.selected) renderDetail();
 }
 
 function setMetric(metric) {
