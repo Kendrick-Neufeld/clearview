@@ -278,7 +278,6 @@ fn niri_windows() -> Option<Vec<Window>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::os::unix::net::UnixListener;
 
     /// Serves one reply on a throwaway socket and then holds the connection
