@@ -41,6 +41,36 @@ cargo build --release
         4236    vesktop              0.4%           Audio
 ```
 
+## Building and checking
+
+```bash
+cargo test --release      # 34 tests across the Rust crates
+./check-ui.sh             # parses every UI module, lints references, runs 40 tests
+cargo build --release
+```
+
+`check-ui.sh` exists because a syntax error or a deleted helper in the
+interface takes the whole page down before a line of it runs — no handler can
+catch that, and on screen it is indistinguishable from a backend failure. The
+reference lint in particular was written after a refactor removed six functions
+and left their callers behind; it finds that in a second rather than in a
+screenshot.
+
+## Distributing
+
+```bash
+NO_STRIP=1 cargo tauri build --bundles appimage,deb
+```
+
+`NO_STRIP=1` is required on Arch: the `strip` bundled inside linuxdeploy is too
+old to read the `.relr.dyn` sections modern libraries use, and fails the build
+without it.
+
+For Arch, `packaging/arch/` holds a PKGBUILD ready for the AUR — see the README
+beside it. An AppImage built here needs glibc 2.39 or newer, because it links
+against this machine's libraries; building it on the oldest distribution you
+intend to support is the only way round that.
+
 ## Installing
 
 ```bash

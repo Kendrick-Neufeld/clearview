@@ -1,0 +1,65 @@
+# Maintainer: bites <kendrickneufeld@gmail.com>
+pkgname=clearview
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A system monitor that groups processes into applications and explains what each one is for"
+arch=('x86_64' 'aarch64')
+url="https://github.com/bites/clearview"
+license=('GPL-3.0-or-later')
+
+# webkit2gtk-4.1 renders the interface; iproute2 provides `ss`, which is how
+# per-application network figures are read.
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'sqlite' 'iproute2' 'hicolor-icon-theme')
+makedepends=('cargo' 'librsvg' 'pkgconf')
+optdepends=(
+  'nvidia-utils: statistics for a discrete NVIDIA graphics card'
+)
+options=('!lto')   # the workspace sets its own
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm755 target/release/clearview           "$pkgdir/usr/bin/clearview"
+  install -Dm755 target/release/clearview-collector "$pkgdir/usr/bin/clearview-collector"
+
+  install -Dm644 packaging/clearview.desktop \
+    "$pkgdir/usr/share/applications/clearview.desktop"
+  install -Dm644 packaging/icons/clearview.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/clearview.svg"
+
+  for size in 16 22 24 32 48 64 128 256 512; do
+    rsvg-convert -w "$size" -h "$size" packaging/icons/clearview.svg \
+      -o "clearview-$size.png"
+    install -Dm644 "clearview-$size.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/clearview.png"
+  done
+
+  # Two units exist because a from-source install puts the collector in
+  # ~/.local/bin and a package puts it in /usr/bin, and systemd resolves
+  # neither from the other. A test asserts the pair cannot drift apart.
+  install -Dm644 packaging/clearview-collector.system.service \
+    "$pkgdir/usr/lib/systemd/user/clearview-collector.service"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

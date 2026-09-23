@@ -268,3 +268,37 @@ fn mb(bytes: u64) -> u32 {
 fn psi(p: Option<btm_probe::system::Pressure>) -> u16 {
     p.map(|p| (p.some.avg10.clamp(0.0, 100.0) * 10.0).round() as u16).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    /// Two unit files exist because a from-source install puts the collector in
+    /// `~/.local/bin` and a package puts it in `/usr/bin`, and systemd will not
+    /// resolve one path from the other. Two files that differ by one line are
+    /// exactly the kind of pair that drifts silently, so this pins them
+    /// together: change anything but `ExecStart=` in one and this fails.
+    #[test]
+    fn the_two_service_units_differ_only_in_their_exec_path() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let read = |name: &str| {
+            std::fs::read_to_string(format!("{root}/packaging/{name}"))
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+        let strip_exec = |text: String| {
+            text.lines()
+                .filter(|l| !l.starts_with("ExecStart="))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        let user = read("clearview-collector.service");
+        let system = read("clearview-collector.system.service");
+
+        assert!(user.contains("ExecStart=%h/.local/bin/clearview-collector"));
+        assert!(system.contains("ExecStart=/usr/bin/clearview-collector"));
+        assert_eq!(
+            strip_exec(user),
+            strip_exec(system),
+            "the two units have drifted apart outside ExecStart"
+        );
+    }
+}

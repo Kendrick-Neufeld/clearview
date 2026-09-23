@@ -13,16 +13,20 @@
 const PAD = { top: 10, right: 12, bottom: 20, left: 58 };
 
 /** Rounds an axis maximum up to a clean 1 / 2 / 5 × 10ⁿ step. */
-function niceTicks(max, count = 4) {
+export function niceTicks(max, count = 4) {
   if (!(max > 0)) return { max: 1, step: 1 };
   const rough = max / count;
   const mag = 10 ** Math.floor(Math.log10(rough));
   const norm = rough / mag;
   const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
-  return { max: Math.ceil(max / step) * step, step };
+  // Rounded to the step's own precision: without this a 0.42 maximum comes
+  // back as 0.6000000000000001, which then leaks into label text and into the
+  // accumulating tick loop.
+  const top = Number((Math.ceil(max / step) * step).toPrecision(12));
+  return { max: top, step };
 }
 
-function timeLabel(t, span) {
+export function timeLabel(t, span) {
   const d = new Date(t * 1000);
   const pad = (n) => String(n).padStart(2, "0");
   // Below two days, the clock is what matters; beyond it, the date is.

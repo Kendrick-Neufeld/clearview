@@ -1,5 +1,9 @@
 import { squarify, foldTail } from "./treemap.js";
 import { drawChart, drawSparkline } from "./chart.js";
+import {
+  arrangeApps, bytesText, describeStep, escapeHtml, filterTree, findGrowth,
+  findSpikes, fmtBytes, fmtPct, inkOn, isApproximate, rateText,
+} from "./lib.js";
 
 /* ==================================================================
    State
@@ -16,6 +20,8 @@ const state = {
   cmdlines: new Map(),  // pid -> argv, fetched once
   tab: "apps",          // "apps" | "perf"
   query: "",            // list filter text
+  procQuery: "",        // filter within the selected app's processes
+  showHistory: false,   // per-app history charts, collapsed by default
   sort: "cpu",          // "cpu" | "mem" | "name"
   heldOrder: null,      // app ids, frozen while the pointer is in the list
   heldLayout: null,     // tile rectangles, frozen while the pointer is in the map
@@ -31,19 +37,6 @@ const $ = (id) => document.getElementById(id);
 /* ==================================================================
    Formatting
    ================================================================== */
-
-const fmtPct = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
-
-function fmtBytes(b) {
-  if (b >= 1024 ** 3) return { value: (b / 1024 ** 3).toFixed(1), unit: "GB" };
-  if (b >= 1024 ** 2) return { value: (b / 1024 ** 2).toFixed(0), unit: "MB" };
-  return { value: (b / 1024).toFixed(0), unit: "KB" };
-}
-
-const bytesText = (b) => {
-  const { value, unit } = fmtBytes(b);
-  return `${value} ${unit}`;
-};
 
 const cpuPct = (usage) => (usage.cpu_cores / state.cpuCount) * 100;
 
@@ -70,33 +63,6 @@ function cssVar(name) {
 }
 
 const colorForKind = (kind) => cssVar(KIND_SLOT[kind] || "--cat-3");
-
-/* Chooses ink or white for a label sitting on a colour fill.
- *
- * Compares the actual contrast of both against the fill and takes the better
- * one. An earlier version thresholded on the fill's luminance instead, which
- * got every single palette colour wrong: white on the light green measured
- * 2.82:1, under the 4.5:1 a label needs, where dark ink gives 6.99:1. A
- * mid-luminance fill is exactly where a threshold guesses and a comparison
- * does not have to. */
-function relativeLuminance(hex) {
-  const m = hex.replace("#", "");
-  const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
-  const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
-  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-function contrastRatio(a, b) {
-  const [la, lb] = [relativeLuminance(a), relativeLuminance(b)];
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
-}
-
-function inkOn(hex) {
-  const ink = "#0b0b0b";
-  const white = "#ffffff";
-  return contrastRatio(hex, ink) >= contrastRatio(hex, white) ? ink : white;
-}
 
 /* ==================================================================
    Summary
@@ -383,39 +349,12 @@ function renderLegend(app) {
    Application list
    ================================================================== */
 
-/* Orders the list, holding it still when someone is trying to click it.
- *
- * Sorting by processor use means the rows resequence every second, so the row
- * you are reaching for slides out from under the cursor. While the pointer is
- * in the list the previous order is reused and only the numbers change. */
 function orderedApps(m) {
-  const q = state.query.trim().toLowerCase();
-  let apps = m.apps;
-  if (q) {
-    apps = apps.filter(
-      (a) =>
-        a.name.toLowerCase().includes(q) ||
-        a.id.toLowerCase().includes(q) ||
-        a.windows.some((w) => w.toLowerCase().includes(q)),
-    );
-  }
-
-  if (state.heldOrder) {
-    const rank = new Map(state.heldOrder.map((id, i) => [id, i]));
-    // Anything that appeared while the order was held goes to the end rather
-    // than pushing the existing rows around.
-    return [...apps].sort(
-      (a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity),
-    );
-  }
-
-  const by = {
-    cpu: (a, b) => b.totals.cpu_cores - a.totals.cpu_cores,
-    mem: (a, b) => b.totals.mem_pss - a.totals.mem_pss,
-    name: (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-  }[state.sort];
-
-  return [...apps].sort(by);
+  return arrangeApps(m.apps, {
+    query: state.query,
+    sort: state.sort,
+    heldOrder: state.heldOrder,
+  });
 }
 
 function renderList(m) {
@@ -461,10 +400,6 @@ function renderList(m) {
   }
 }
 
-/* Mirrors the model's rule: a substituted fraction under a twentieth is
-   smaller than the rounding, so it earns no qualifier. */
-const isApproximate = (u) => u.mem_unmeasured * 20 > u.mem_pss;
-
 function subtitleFor(a) {
   if (a.kind === "Kernel") return "Kernel threads — part of the operating system";
   if (a.kind === "System") return "System service";
@@ -482,6 +417,7 @@ function openDetail(appId) {
   if (state.selected !== appId) {
     state.expanded.clear();
     state.ending = null;
+    state.procQuery = "";
   }
   state.selected = appId;
   renderDetail();
@@ -540,16 +476,66 @@ function renderDetail() {
     body.appendChild(html(`<div class="note">Made up of ${parts}.</div>`));
   }
 
-  // One cheap query for the app being looked at, rather than sixty for a
-  // list nobody is reading.
-  const spark = html(`<div><div class="subhead">Processor, last 24 hours</div><div class="spark" id="app-spark"></div></div>`);
-  body.appendChild(spark);
-  loadAppSpark(app.id);
+  // History is collapsed by default: four charts would push the process list
+  // off the panel, and most visits are about what is happening now.
+  const historyBlock = html(`<div class="history"></div>`);
+  const toggle = html(
+    `<button class="disclosure" aria-expanded="${state.showHistory}">` +
+      `<span class="disclosure-mark">${state.showHistory ? "\u25be" : "\u25b8"}</span>` +
+      `Last 24 hours</button>`,
+  );
+  toggle.onclick = () => {
+    state.showHistory = !state.showHistory;
+    const saved = loadPrefs();
+    saved.showHistory = state.showHistory;
+    savePrefs(saved);
+    renderDetail();
+  };
+  historyBlock.appendChild(toggle);
+  if (state.showHistory) {
+    historyBlock.appendChild(
+      html(`<div class="sparks">
+        <div class="spark-row"><span class="spark-label">Processor</span><div class="spark" id="spark-cpu"></div></div>
+        <div class="spark-row"><span class="spark-label">Memory</span><div class="spark" id="spark-mem"></div></div>
+        <div class="spark-row"><span class="spark-label">Graphics</span><div class="spark" id="spark-gpu"></div></div>
+        <div class="spark-row"><span class="spark-label">Network</span><div class="spark" id="spark-net"></div></div>
+      </div>`),
+    );
+  }
+  body.appendChild(historyBlock);
+  if (state.showHistory) loadAppSpark(app.id);
 
   renderActions(app, body);
 
-  body.appendChild(html(`<div class="subhead">Processes</div>`));
-  for (const root of app.roots) renderProc(root, body, 0);
+  // The process list gets its own filter: an app with thirty processes is a
+  // long scroll, and what is being looked for is usually known by name.
+  const head = html(
+    `<div class="proc-head">` +
+      `<span class="subhead" style="margin:0">Processes</span>` +
+      `<input class="search proc-search" id="proc-search" type="search" spellcheck="false"` +
+      ` placeholder="Filter processes\u2026" aria-label="Filter processes" /></div>`,
+  );
+  body.appendChild(head);
+  const procSearch = head.querySelector("#proc-search");
+  procSearch.value = state.procQuery;
+  procSearch.addEventListener("input", () => {
+    state.procQuery = procSearch.value;
+    renderDetail();
+    // Redrawing the panel replaces the field, so focus has to be put back.
+    const again = $("proc-search");
+    if (again) {
+      again.focus();
+      again.setSelectionRange(again.value.length, again.value.length);
+    }
+  });
+
+  const shown = filterTree(app.roots, state.procQuery);
+  if (!shown.length) {
+    body.appendChild(
+      html(`<div class="list-empty">No process matches \u201c${escapeHtml(state.procQuery)}\u201d.</div>`),
+    );
+  }
+  for (const root of shown) renderProc(root, body, 0);
 
   body.scrollTop = scroll;
 }
@@ -685,15 +671,31 @@ async function endApp(app, targets, force) {
 
 async function loadAppSpark(key) {
   const rows = await invoke("app_history", { key, spanSecs: 86400 });
-  const host = $("app-spark");
   // The panel redraws constantly; by the time this resolves the user may be
   // looking at something else entirely.
-  if (!host || state.selected !== key) return;
-  if (!rows?.length) {
-    host.innerHTML = `<div class="chart-empty" style="min-height:34px;font-size:11px">No history for this app yet</div>`;
-    return;
+  if (state.selected !== key || !state.showHistory) return;
+
+  for (const [id, pick] of [
+    ["spark-cpu", (r) => r.cpu_pm / 10],
+    ["spark-mem", (r) => r.mem_mb],
+    ["spark-gpu", (r) => r.gpu_pm / 10],
+    ["spark-net", (r) => r.net_kbps],
+  ]) {
+    const host = $(id);
+    if (!host) continue;
+    if (!rows?.length) {
+      host.innerHTML = `<div class="spark-empty">no history yet</div>`;
+      continue;
+    }
+    const points = rows.map((r) => [r.t, pick(r)]);
+    // A flat zero line says "this app never used it", which is worth showing
+    // as emptiness rather than as a line pinned to the axis.
+    if (points.every((point) => point[1] === 0)) {
+      host.innerHTML = `<div class="spark-empty">none recorded</div>`;
+      continue;
+    }
+    drawSparkline(host, points, cssVar("--cat-1"));
   }
-  drawSparkline(host, rows.map((r) => [r.t, r.cpu_pm / 10]), cssVar("--cat-1"));
 }
 
 function countRoles(nodes, acc = new Map()) {
@@ -830,61 +832,18 @@ async function loadHistory() {
   renderPerf();
 }
 
-/* The same outlier rule the backend applies to stored history, run over the
+/* The same outlier rules the backend applies to stored history, run over the
    live buffer — where the culprit is known per second rather than per minute. */
 function liveSpikes(points, pick, nameOf, valueOf) {
-  if (points.length < 12) return [];
-  const sorted = points.map(pick).sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const q3 = sorted[Math.floor(sorted.length * 0.75)];
-  const largest = sorted[sorted.length - 1] || 1;
-  const spread = Math.max(q3 - median, largest / 20, 0.5);
-  const threshold = Math.max(median + spread * 3, largest * 0.25);
-
-  const peaks = [];
-  let run = null;
-  for (const p of points) {
-    if (pick(p) >= threshold && pick(p) > 0) {
-      if (!run || pick(p) > pick(run)) run = p;
-    } else if (run) {
-      peaks.push(run);
-      run = null;
-    }
-  }
-  if (run) peaks.push(run);
-
-  return peaks
-    .sort((a, b) => pick(b) - pick(a))
-    .slice(0, 6)
-    .sort((a, b) => a.t - b.t)
-    .map((p) => ({
-      t: p.t,
-      value: pick(p),
-      app: nameOf(p),
-      app_value: valueOf(p),
-      app_window: 1,
-    }));
+  return findSpikes(points, pick).map((p) => ({
+    t: p.t, value: pick(p), app: nameOf(p), app_value: valueOf(p), app_window: 1,
+  }));
 }
 
-/* Memory's live events are the biggest jumps, not the biggest values — the
-   same reasoning the backend applies to stored history. */
 function liveGrowth(points) {
-  if (points.length < 4) return [];
-  const jumps = [];
-  for (let i = 1; i < points.length; i += 1) {
-    const growth = points[i].memGb - points[i - 1].memGb;
-    if (growth > 0) jumps.push({ t: points[i].t, growth });
-  }
-  if (!jumps.length) return [];
-  const largest = Math.max(...jumps.map((j) => j.growth));
-  // A tenth of a gigabyte is the smallest jump worth a mark.
-  const floor = Math.max(largest / 3, 0.1);
-  return jumps
-    .filter((j) => j.growth >= floor)
-    .sort((a, b) => b.growth - a.growth)
-    .slice(0, 5)
-    .sort((a, b) => a.t - b.t)
-    .map((j) => ({ t: j.t, value: j.growth, app: null, app_value: 0, app_window: 1 }));
+  return findGrowth(points, (p) => p.memGb).map((j) => ({
+    t: j.t, value: j.growth, app: null, app_value: 0, app_window: 1,
+  }));
 }
 
 function renderPerf() {
@@ -1079,9 +1038,6 @@ function renderPerf() {
   fillLegend($("psi-legend"), psi);
 }
 
-const rateText = (kb) =>
-  kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB/s` : `${Math.round(kb)} KB/s`;
-
 function markersFor(spikes, valueOf) {
   return spikes.map((s) => ({
     t: s.t,
@@ -1249,15 +1205,6 @@ function renderSpikes(host, spikes, opts) {
     `<div class="spike-note">${opts.note ? `${opts.note} ` : ""}${provenance}</div>`;
 }
 
-function describeStep(rows) {
-  if (rows.length < 2) return "sample";
-  const step = rows[1].t - rows[0].t;
-  const unit = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  if (step < 60) return unit(step, "second");
-  if (step < 3600) return unit(Math.round(step / 60), "minute");
-  return unit(Math.round(step / 3600), "hour");
-}
-
 function setTab(tab, remember = true) {
   state.tab = tab;
   if (remember) {
@@ -1324,11 +1271,6 @@ function html(markup) {
   const t = document.createElement("template");
   t.innerHTML = markup.trim();
   return t.content.firstElementChild;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 const tauri = () => window.__TAURI__;
@@ -1634,6 +1576,7 @@ async function start() {
   // Come back to whichever view was last open. Done after the live wiring, so
   // the history path can never hold up the live path.
   if (prefs.span) state.span = prefs.span;
+  if (prefs.showHistory) state.showHistory = true;
   if (prefs.sort) {
     state.sort = prefs.sort;
     for (const b of document.querySelectorAll("[data-sort]")) {
