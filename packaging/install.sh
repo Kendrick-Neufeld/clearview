@@ -16,7 +16,16 @@ fi
 
 install -Dm755 target/release/clearview             "$PREFIX/bin/clearview"
 install -Dm755 target/release/clearview-collector   "$PREFIX/bin/clearview-collector"
-install -Dm644 packaging/clearview.desktop          "$PREFIX/share/applications/clearview.desktop"
+# Exec is rewritten to an absolute path rather than left as a bare name.
+# A bare name is resolved against PATH, and a graphical launcher inherits the
+# systemd user environment, which does not include ~/.local/bin -- so clicking
+# the menu entry did nothing while running it from a terminal worked fine.
+# A package installs to /usr/bin and needs no rewrite; this does.
+sed "s|^Exec=clearview$|Exec=$PREFIX/bin/clearview|" packaging/clearview.desktop \
+  > "$PREFIX/share/applications/.clearview.desktop.tmp"
+install -Dm644 "$PREFIX/share/applications/.clearview.desktop.tmp" \
+  "$PREFIX/share/applications/clearview.desktop"
+rm -f "$PREFIX/share/applications/.clearview.desktop.tmp"
 install -Dm644 packaging/icons/clearview.svg        "$ICONS/scalable/apps/clearview.svg"
 
 # Raster sizes as well as the scalable one: panels and some launchers still

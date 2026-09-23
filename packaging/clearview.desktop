@@ -1,3 +1,7 @@
+# StartupWMClass must match the binary name, which is what the compositor
+# reports as the window's app id; without it the window gets no taskbar icon.
+# Exec is deliberately a bare name here -- packaging/install.sh rewrites it to
+# an absolute path, because a launcher's PATH does not include ~/.local/bin.
 [Desktop Entry]
 Type=Application
 Name=Clearview
@@ -8,6 +12,4 @@ Icon=clearview
 Terminal=false
 Categories=System;Monitor;
 Keywords=task;manager;process;processes;cpu;memory;ram;monitor;performance;system;
-# Must match the binary name, which is what the compositor reports as the
-# window's app id. Without it the window gets no icon in a taskbar.
 StartupWMClass=clearview
