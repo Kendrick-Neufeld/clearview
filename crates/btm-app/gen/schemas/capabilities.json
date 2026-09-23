@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"The main window streams snapshots from the backend, so it needs the core event permissions. Nothing else is granted: no filesystem, shell or network access.","local":true,"windows":["main"],"permissions":["core:default"]}}

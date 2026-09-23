@@ -41,6 +41,34 @@ cargo build --release
         4236    vesktop              0.4%           Audio
 ```
 
+## Getting it
+
+The easiest way is the AppImage from the
+[releases page](https://github.com/Kendrick-Neufeld/clearview/releases) — one
+file, no installation:
+
+```bash
+chmod +x Clearview-*.AppImage
+./Clearview-*.AppImage
+```
+
+It needs **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13, or any
+current rolling release). On anything older it will refuse to start, and
+building from source is the way round it.
+
+The AppImage runs the application only. History — everything behind the
+Performance tab's Hour, Day, Week and Month views — comes from a small
+background service, which means installing properly:
+
+```bash
+git clone https://github.com/Kendrick-Neufeld/clearview
+cd clearview
+cargo build --release
+./packaging/install.sh
+```
+
+On Arch there is a PKGBUILD in `packaging/arch/`.
+
 ## Building and checking
 
 ```bash

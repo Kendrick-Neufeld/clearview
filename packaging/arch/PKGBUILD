@@ -1,10 +1,10 @@
-# Maintainer: bites <kendrickneufeld@gmail.com>
+# Maintainer: Kendrick-Neufeld <kendrickneufeld@gmail.com>
 pkgname=clearview
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="A system monitor that groups processes into applications and explains what each one is for"
 arch=('x86_64' 'aarch64')
-url="https://github.com/bites/clearview"
+url="https://github.com/Kendrick-Neufeld/clearview"
 license=('GPL-3.0-or-later')
 
 # webkit2gtk-4.1 renders the interface; iproute2 provides `ss`, which is how

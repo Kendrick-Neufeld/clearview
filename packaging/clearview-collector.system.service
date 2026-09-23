@@ -1,6 +1,6 @@
 [Unit]
 Description=Clearview history collector
-Documentation=https://github.com/bites/clearview
+Documentation=https://github.com/Kendrick-Neufeld/clearview
 
 [Service]
 Type=simple
