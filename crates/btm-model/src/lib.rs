@@ -102,6 +102,10 @@ pub struct App {
     /// real figure rather than the inflated sum of RSS other tools report.
     pub totals: Usage,
     pub process_count: usize,
+    /// Why closing this would be a bad idea, when it would be. Present so the
+    /// interface can warn in the app's own terms instead of asking the person
+    /// to recognise a process name.
+    pub caution: Option<String>,
 }
 
 impl App {
@@ -144,6 +148,7 @@ pub struct SystemModel {
     pub core_of_cpu: Vec<usize>,
     pub gpus: Vec<btm_probe::gpu::GpuInfo>,
     pub interfaces: Vec<btm_probe::sampler::InterfaceRate>,
+    pub disks: Vec<btm_probe::sampler::DiskRate>,
 }
 
 impl SystemModel {
@@ -190,6 +195,7 @@ impl SystemModel {
             core_of_cpu: sample.core_of_cpu.clone(),
             gpus: sample.gpus.clone(),
             interfaces: sample.interfaces.clone(),
+            disks: sample.disks.clone(),
         }
     }
 
@@ -261,6 +267,8 @@ fn build_app(
         AppKind::Background
     };
 
+    let caution = caution_for(&id, kind, procs);
+
     App {
         name: match (&entry, kind) {
             (Some(e), _) => e.name.clone(),
@@ -275,6 +283,50 @@ fn build_app(
         process_count: procs.len(),
         totals,
         roots: nodes,
+        caution,
+    }
+}
+
+/// Whether closing an app would take something important with it.
+///
+/// The judgement lives here rather than in the interface because it is domain
+/// knowledge: which names belong to a desktop session, and what a cgroup slice
+/// implies. A warning names the consequence — "this would end your desktop
+/// session" — rather than the process, because the consequence is what someone
+/// is actually deciding about.
+fn caution_for(id: &str, kind: AppKind, procs: &[&ProcSample]) -> Option<String> {
+    // Compositors and display servers. Ending one closes every window with it.
+    const SESSION: [&str; 9] = [
+        "Hyprland", "sway", "river", "niri", "gnome-shell", "plasmashell", "Xorg", "Xwayland",
+        "weston",
+    ];
+    // Infrastructure that other programs depend on while they run.
+    const PLUMBING: [&str; 6] =
+        ["pipewire", "pipewire-pulse", "wireplumber", "dbus-broker", "systemd", "gnome-keyring-daemon"];
+
+    let names: Vec<&str> = procs.iter().map(|p| p.comm.as_str()).collect();
+    let matches = |list: &[&str]| {
+        list.iter().any(|n| id.eq_ignore_ascii_case(n) || names.iter().any(|c| c == n))
+    };
+
+    match kind {
+        AppKind::Kernel => Some(
+            "These belong to the kernel itself. They cannot be closed, and nothing here will try."
+                .into(),
+        ),
+        _ if matches(&SESSION) => Some(
+            "This is your desktop itself. Closing it would end your session and shut every              window you have open."
+                .into(),
+        ),
+        _ if matches(&PLUMBING) => Some(
+            "Other programs rely on this while they are running. Closing it is likely to break              sound, settings or logins until you sign in again."
+                .into(),
+        ),
+        AppKind::System => Some(
+            "This is a system service. It belongs to the operating system rather than to you,              and closing it usually needs administrator rights."
+                .into(),
+        ),
+        _ => None,
     }
 }
 

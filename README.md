@@ -64,6 +64,25 @@ cargo build --release
 | Per-app GPU | DRM fdinfo, keyed by client id | keyed by client, not pid, or a browser's use multiplies by its tab count |
 | Network, machine-wide | `/proc/net/dev` | counts everything |
 | Network, per app | `ss`, per-socket TCP counters | **TCP only** — UDP keeps no such counter, so QUIC is invisible and per-app sums read lower than the total |
+| Disk, machine-wide | `/proc/diskstats` | whole devices only; partitions carry overlapping counters |
+| Disk, per app | `/proc/PID/io` | what the program asked the kernel for, which is not what the drive did — cached reads never reach it |
+
+## Closing an application
+
+The only irreversible thing here, so it is built to be hard to get wrong:
+
+- **Two steps.** The first press states the consequence; the second carries it out.
+- **Asked, not forced.** `SIGTERM` first, so a program can save and exit properly.
+  Forcing is offered only after asking has visibly failed, and says plainly that
+  nothing will be saved.
+- **Addressed by identity, not by number.** Pids are reused. Between a row being
+  drawn and a click landing, a process can exit and its number be handed to
+  something else — so the start time is re-read immediately before the signal and
+  must still match. It does not, nothing is sent.
+- **Consequences in the app's own terms.** Closing your compositor says it will
+  end your session and shut every window, rather than expecting you to recognise
+  a process name.
+- Kernel threads and init are refused outright.
 
 ## Reading a list that will not sit still
 

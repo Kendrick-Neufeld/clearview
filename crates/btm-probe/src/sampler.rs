@@ -5,6 +5,7 @@
 //! need two samples and the discipline to compare the right pairs.
 
 use crate::conf;
+use crate::disk::{self, DiskDevice};
 use crate::gpu::{self, DrmScanner, GpuInfo};
 use crate::net::{self, Interface};
 use crate::process::{self, MemRollup, ProcIo, ProcKey, ProcStat};
@@ -56,6 +57,18 @@ impl Default for SamplerConfig {
             nvidia_interval: Duration::from_secs(5),
         }
     }
+}
+
+/// Throughput on one storage device, in bytes per second.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskRate {
+    pub name: String,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    /// Fraction of the interval the device had at least one request in flight.
+    /// A device can be saturated at modest throughput, and this is what shows
+    /// it.
+    pub busy: f64,
 }
 
 /// Throughput on one interface, in bytes per second.
@@ -149,6 +162,7 @@ pub struct Sample {
     pub core_of_cpu: Vec<usize>,
     pub gpus: Vec<GpuInfo>,
     pub interfaces: Vec<InterfaceRate>,
+    pub disks: Vec<DiskRate>,
 }
 
 struct PrevProc {
@@ -191,6 +205,8 @@ pub struct Sampler {
     net_rates: HashMap<i32, (f64, f64)>,
     iface_prev: Slow<Vec<Interface>>,
     iface_rates: Vec<InterfaceRate>,
+    disk_prev: Slow<Vec<DiskDevice>>,
+    disk_rates: Vec<DiskRate>,
     nvidia: Slow<Vec<GpuInfo>>,
 }
 
@@ -211,6 +227,8 @@ impl Sampler {
             net_rates: HashMap::new(),
             iface_prev: Slow::default(),
             iface_rates: Vec::new(),
+            disk_prev: Slow::default(),
+            disk_rates: Vec::new(),
             nvidia: Slow::default(),
         }
     }
@@ -385,6 +403,32 @@ impl Sampler {
         }
         self.iface_prev = Slow { value: interfaces, at: Some(now) };
 
+        // Whole-device disk activity. Unlike the per-process byte counters this
+        // is what the hardware actually did: cached reads never reach it, and
+        // writeback reaches it long after the process that asked moved on.
+        let disks = disk::read_devices();
+        if let Some(last) = self.disk_prev.at {
+            let dt = now.duration_since(last).as_secs_f64();
+            if dt > 0.0 {
+                self.disk_rates = disks
+                    .iter()
+                    .map(|d| {
+                        let before = self.disk_prev.value.iter().find(|p| p.name == d.name);
+                        let (r, w, busy) = match before {
+                            Some(b) => (
+                                d.read_bytes.saturating_sub(b.read_bytes) as f64 / dt,
+                                d.write_bytes.saturating_sub(b.write_bytes) as f64 / dt,
+                                (d.io_ms.saturating_sub(b.io_ms) as f64 / 1000.0 / dt).min(1.0),
+                            ),
+                            None => (0.0, 0.0, 0.0),
+                        };
+                        DiskRate { name: d.name.clone(), read_bps: r, write_bps: w, busy }
+                    })
+                    .collect();
+            }
+        }
+        self.disk_prev = Slow { value: disks, at: Some(now) };
+
         let (thermals, power_w, core_mhz) = if self.config.collect_sensors {
             (sensors::read_thermals(), self.power.read_watts(), sensors::core_frequencies_mhz())
         } else {
@@ -434,6 +478,7 @@ impl Sampler {
             core_of_cpu: self.core_of_cpu.clone(),
             gpus,
             interfaces: self.iface_rates.clone(),
+            disks: self.disk_rates.clone(),
         })
     }
 

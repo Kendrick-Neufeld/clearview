@@ -47,6 +47,7 @@ pub enum Metric {
     Memory,
     Gpu,
     Network,
+    Disk,
 }
 
 impl Metric {
@@ -58,6 +59,7 @@ impl Metric {
             Metric::Memory => "mem_mb",
             Metric::Gpu => "gpu_pm",
             Metric::Network => "net_kbps",
+            Metric::Disk => "disk_kbps",
         }
     }
 
@@ -66,6 +68,7 @@ impl Metric {
             "memory" => Metric::Memory,
             "gpu" => Metric::Gpu,
             "network" => Metric::Network,
+            "disk" => Metric::Disk,
             _ => Metric::Cpu,
         }
     }
@@ -96,6 +99,12 @@ pub struct SystemPoint {
     /// Whole-machine network throughput in kilobytes per second.
     pub net_rx_kbps: u32,
     pub net_tx_kbps: u32,
+    /// Whole-device disk throughput in kilobytes per second.
+    pub disk_rd_kbps: u32,
+    pub disk_wr_kbps: u32,
+    /// Fraction of the interval the busiest device had work in flight, per
+    /// mille. A drive can be saturated at modest throughput.
+    pub disk_busy_pm: u16,
 }
 
 /// One app's reading in one bucket.
@@ -109,6 +118,7 @@ pub struct AppPoint {
     pub mem_mb: u32,
     pub gpu_pm: u16,
     pub net_kbps: u32,
+    pub disk_kbps: u32,
 }
 
 /// A row read back out.
@@ -119,6 +129,7 @@ pub struct AppSeriesRow {
     pub mem_mb: u32,
     pub gpu_pm: u16,
     pub net_kbps: u32,
+    pub disk_kbps: u32,
 }
 
 pub struct Store {
@@ -227,6 +238,9 @@ impl Store {
                 ("power_w", "INTEGER NOT NULL DEFAULT 0"),
                 ("net_rx_kbps", "INTEGER NOT NULL DEFAULT 0"),
                 ("net_tx_kbps", "INTEGER NOT NULL DEFAULT 0"),
+                ("disk_rd_kbps", "INTEGER NOT NULL DEFAULT 0"),
+                ("disk_wr_kbps", "INTEGER NOT NULL DEFAULT 0"),
+                ("disk_busy_pm", "INTEGER NOT NULL DEFAULT 0"),
             ],
         )?;
         self.add_columns(
@@ -234,6 +248,7 @@ impl Store {
             &[
                 ("gpu_pm", "INTEGER NOT NULL DEFAULT 0"),
                 ("net_kbps", "INTEGER NOT NULL DEFAULT 0"),
+                ("disk_kbps", "INTEGER NOT NULL DEFAULT 0"),
             ],
         )
     }
@@ -261,12 +276,14 @@ impl Store {
         self.conn.execute(
             "INSERT OR REPLACE INTO system_series
                (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
-                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps,
+                disk_rd_kbps, disk_wr_kbps, disk_busy_pm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 res, p.t, p.cpu_pm, p.mem_mb, p.swap_mb, p.psi_cpu_pm, p.psi_mem_pm, p.psi_io_pm,
                 p.gpu_pm, p.gpu2_pm, p.cpu_temp_c, p.gpu_temp_c, p.power_w,
-                p.net_rx_kbps, p.net_tx_kbps
+                p.net_rx_kbps, p.net_tx_kbps,
+                p.disk_rd_kbps, p.disk_wr_kbps, p.disk_busy_pm
             ],
         )?;
         Ok(())
@@ -301,8 +318,9 @@ impl Store {
             let mut insert_app = tx.prepare("INSERT INTO app (key, name) VALUES (?1, ?2)")?;
             let mut rename = tx.prepare("UPDATE app SET name = ?2 WHERE id = ?1 AND name <> ?2")?;
             let mut insert_row = tx.prepare(
-                "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR REPLACE INTO app_series
+                   (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps, disk_kbps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
 
             for p in &chosen {
@@ -318,7 +336,9 @@ impl Store {
                         tx.last_insert_rowid()
                     }
                 };
-                insert_row.execute(params![res, t, id, p.cpu_pm, p.mem_mb, p.gpu_pm, p.net_kbps])?;
+                insert_row.execute(params![
+                    res, t, id, p.cpu_pm, p.mem_mb, p.gpu_pm, p.net_kbps, p.disk_kbps
+                ])?;
             }
         }
         tx.commit()?;
@@ -338,7 +358,8 @@ impl Store {
         let n = self.conn.execute(
             "INSERT OR REPLACE INTO system_series
                (res, t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
-                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps)
+                gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps,
+                disk_rd_kbps, disk_wr_kbps, disk_busy_pm)
              SELECT ?2,
                     (t / ?3) * ?3,
                     CAST(AVG(cpu_pm)     AS INTEGER),
@@ -356,7 +377,10 @@ impl Store {
                     MAX(gpu_temp_c),
                     MAX(power_w),
                     CAST(AVG(net_rx_kbps) AS INTEGER),
-                    CAST(AVG(net_tx_kbps) AS INTEGER)
+                    CAST(AVG(net_tx_kbps) AS INTEGER),
+                    CAST(AVG(disk_rd_kbps) AS INTEGER),
+                    CAST(AVG(disk_wr_kbps) AS INTEGER),
+                    MAX(disk_busy_pm)
                FROM system_series
               WHERE res = ?1 AND t < ?4
               GROUP BY (t / ?3)",
@@ -370,12 +394,14 @@ impl Store {
         let bucket = to as i64;
         let cutoff = (now / bucket) * bucket;
         let n = self.conn.execute(
-            "INSERT OR REPLACE INTO app_series (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps)
+            "INSERT OR REPLACE INTO app_series
+               (res, t, app_id, cpu_pm, mem_mb, gpu_pm, net_kbps, disk_kbps)
              SELECT ?2, (t / ?3) * ?3, app_id,
                     CAST(AVG(cpu_pm) AS INTEGER),
                     CAST(AVG(mem_mb) AS INTEGER),
                     CAST(AVG(gpu_pm) AS INTEGER),
-                    CAST(AVG(net_kbps) AS INTEGER)
+                    CAST(AVG(net_kbps) AS INTEGER),
+                    CAST(AVG(disk_kbps) AS INTEGER)
                FROM app_series
               WHERE res = ?1 AND t < ?4
               GROUP BY (t / ?3), app_id",
@@ -417,7 +443,8 @@ impl Store {
     pub fn system_series(&self, res: u32, since: i64, until: i64) -> Result<Vec<SystemPoint>> {
         let mut stmt = self.conn.prepare(
             "SELECT t, cpu_pm, mem_mb, swap_mb, psi_cpu_pm, psi_mem_pm, psi_io_pm,
-                    gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps
+                    gpu_pm, gpu2_pm, cpu_temp_c, gpu_temp_c, power_w, net_rx_kbps, net_tx_kbps,
+                    disk_rd_kbps, disk_wr_kbps, disk_busy_pm
                FROM system_series
               WHERE res = ?1 AND t >= ?2 AND t <= ?3
               ORDER BY t",
@@ -438,6 +465,9 @@ impl Store {
                 power_w: r.get(11)?,
                 net_rx_kbps: r.get(12)?,
                 net_tx_kbps: r.get(13)?,
+                disk_rd_kbps: r.get(14)?,
+                disk_wr_kbps: r.get(15)?,
+                disk_busy_pm: r.get(16)?,
             })
         })?;
         rows.collect()
@@ -452,7 +482,7 @@ impl Store {
         until: i64,
     ) -> Result<Vec<AppSeriesRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.t, s.cpu_pm, s.mem_mb, s.gpu_pm, s.net_kbps
+            "SELECT s.t, s.cpu_pm, s.mem_mb, s.gpu_pm, s.net_kbps, s.disk_kbps
                FROM app_series s JOIN app a ON a.id = s.app_id
               WHERE a.key = ?1 AND s.res = ?2 AND s.t >= ?3 AND s.t <= ?4
               ORDER BY s.t",
@@ -464,6 +494,7 @@ impl Store {
                 mem_mb: r.get(2)?,
                 gpu_pm: r.get(3)?,
                 net_kbps: r.get(4)?,
+                disk_kbps: r.get(5)?,
             })
         })?;
         rows.collect()
@@ -604,6 +635,7 @@ mod tests {
                 mem_mb: 0,
                 gpu_pm: 0,
                 net_kbps: 0,
+                disk_kbps: 0,
             })
             .collect();
         // One app using no CPU but a lot of memory must survive on that alone.
@@ -614,6 +646,7 @@ mod tests {
             mem_mb: 4096,
             gpu_pm: 0,
             net_kbps: 0,
+                        disk_kbps: 0,
         });
 
         let written = store.record_apps(RES_MINUTE, 60, &points).unwrap();
@@ -638,6 +671,7 @@ mod tests {
                     mem_mb: 5,
                     gpu_pm: 0,
                     net_kbps: 0,
+                        disk_kbps: 0,
                 }],
             )
             .unwrap();
@@ -687,6 +721,7 @@ mod capacity {
                         mem_mb: (200 + (i as u32 * 37) % 3000),
                         gpu_pm: ((t / step) % 300) as u16,
                         net_kbps: ((t / step) % 5000) as u32,
+                        disk_kbps: ((t / step) % 900) as u32,
                     })
                     .collect();
                 store.record_apps(res, t, &points).unwrap();
@@ -722,6 +757,9 @@ mod capacity {
                             power_w: 28,
                             net_rx_kbps: 900,
                             net_tx_kbps: 300,
+                            disk_rd_kbps: 400,
+                            disk_wr_kbps: 150,
+                            disk_busy_pm: 120,
                         },
                     )
                     .unwrap();

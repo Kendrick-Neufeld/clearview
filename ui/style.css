@@ -1160,3 +1160,110 @@ body {
 }
 
 #view-apps[data-layout="side"] .map-section .section-note { display: none; }
+
+/* ===================================================================
+   Closing an application
+
+   The only irreversible thing this app does, so it is deliberately not
+   a single click, and the warning is stated before the button that
+   carries it out.
+   =================================================================== */
+
+.actions {
+  margin: var(--s-4) 0 var(--s-2);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--hairline);
+}
+
+.danger {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  background: transparent;
+  border: 1px solid var(--ring);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.danger:hover {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+}
+
+.danger[data-armed="true"] {
+  color: #fff;
+  background: var(--status-critical);
+  border-color: var(--status-critical);
+}
+
+.danger[disabled] { opacity: 0.5; cursor: default; }
+
+.confirm {
+  background: var(--surface-sunk);
+  border-radius: var(--radius);
+  padding: var(--s-3);
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.confirm-title {
+  color: var(--ink);
+  font-weight: 500;
+  margin-bottom: var(--s-1);
+}
+
+/* A caution is a status, so it wears a status colour and always carries its
+   sentence — the colour never has to be read on its own. */
+.confirm-caution {
+  display: flex;
+  gap: var(--s-2);
+  margin: var(--s-2) 0;
+  padding: var(--s-2) var(--s-3);
+  border-left: 2px solid var(--status-serious);
+  color: var(--ink);
+  text-wrap: pretty;
+}
+
+.confirm-row {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.ghost {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.ghost:hover { background: var(--plane); color: var(--ink); }
+
+.confirm-result {
+  margin-top: var(--s-2);
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.proc-end {
+  font: inherit;
+  font-size: 11px;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid var(--ring);
+  border-radius: var(--radius);
+  padding: 1px 7px;
+  margin-left: var(--s-2);
+  cursor: pointer;
+  flex: none;
+}
+
+.proc-end:hover { color: var(--status-critical); border-color: var(--status-critical); }

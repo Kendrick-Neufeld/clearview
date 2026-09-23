@@ -39,6 +39,7 @@ struct Accum {
     mem_mb_sum: u64,
     gpu_pm_sum: u64,
     net_kbps_sum: u64,
+    disk_kbps_sum: u64,
     ticks: u32,
 }
 
@@ -50,12 +51,14 @@ impl Bucket {
             mem_mb_sum: 0,
             gpu_pm_sum: 0,
             net_kbps_sum: 0,
+            disk_kbps_sum: 0,
             ticks: 0,
         });
         e.cpu_pm_sum += point.cpu_pm as u64;
         e.mem_mb_sum += point.mem_mb as u64;
         e.gpu_pm_sum += point.gpu_pm as u64;
         e.net_kbps_sum += point.net_kbps as u64;
+        e.disk_kbps_sum += point.disk_kbps as u64;
         e.ticks += 1;
         if e.name != name {
             e.name = name.to_string();
@@ -78,6 +81,7 @@ impl Bucket {
                     mem_mb: (a.mem_mb_sum / n) as u32,
                     gpu_pm: (a.gpu_pm_sum / n) as u16,
                     net_kbps: (a.net_kbps_sum / n) as u32,
+                    disk_kbps: (a.disk_kbps_sum / n) as u32,
                 }
             })
             .collect()
@@ -109,7 +113,7 @@ fn main() {
         collect_pss: true,
         pss_interval: Duration::from_secs(30),
         pss_top_n: 48,
-        collect_io: false,
+        collect_io: true,
         collect_cmdline: true,
         // The collector records graphics, sensors and network too, but on
         // slower clocks than the foreground view — it is storing minute
@@ -141,6 +145,11 @@ fn main() {
         let discrete = sample.gpus.iter().find(|g| !g.busy_from_clients);
         let net_rx: f64 = sample.interfaces.iter().map(|i| i.rx_bps).sum();
         let net_tx: f64 = sample.interfaces.iter().map(|i| i.tx_bps).sum();
+        let disk_rd: f64 = sample.disks.iter().map(|d| d.read_bps).sum();
+        let disk_wr: f64 = sample.disks.iter().map(|d| d.write_bps).sum();
+        // The busiest single device, not a sum: two drives each half busy is
+        // not one drive fully busy.
+        let disk_busy = sample.disks.iter().map(|d| d.busy).fold(0.0f64, f64::max);
 
         let point = SystemPoint {
             // Align to the tick so re-runs overwrite rather than interleave.
@@ -158,6 +167,9 @@ fn main() {
             power_w: sample.power_w.map(|w| w.round().max(0.0) as u16).unwrap_or(0),
             net_rx_kbps: (net_rx / 1024.0) as u32,
             net_tx_kbps: (net_tx / 1024.0) as u32,
+            disk_rd_kbps: (disk_rd / 1024.0) as u32,
+            disk_wr_kbps: (disk_wr / 1024.0) as u32,
+            disk_busy_pm: per_mille(disk_busy),
         };
         if let Err(e) = store.record_system(RES_FINE, &point) {
             eprintln!("clearview-collector: write failed: {e}");
@@ -175,6 +187,8 @@ fn main() {
                     mem_mb: mb(app.totals.mem_pss),
                     gpu_pm: per_mille(app.totals.gpu_busy),
                     net_kbps: (app.totals.net_bps() / 1024.0) as u32,
+                    disk_kbps: ((app.totals.disk_read_bps + app.totals.disk_write_bps) / 1024.0)
+                        as u32,
                 },
             );
         }

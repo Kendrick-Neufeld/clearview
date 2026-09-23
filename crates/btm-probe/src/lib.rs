@@ -6,6 +6,8 @@
 //! two samples (rates) and the guards needed to keep that arithmetic honest.
 
 pub mod conf;
+pub mod control;
+pub mod disk;
 pub mod desktop;
 pub mod gpu;
 pub mod net;

@@ -22,7 +22,8 @@ const state = {
   span: 0,              // seconds of history shown; 0 means the live buffer
   history: [],          // machine series for the current span
   live: [],             // rolling per-second buffer, newest last
-  spikes: { cpu: [], memory: [], gpu: [], network: [] },
+  spikes: { cpu: [], memory: [], gpu: [], network: [], disk: [] },
+  ending: null,        // in-flight confirmation for closing an app
 };
 
 const $ = (id) => document.getElementById(id);
@@ -462,7 +463,10 @@ function subtitleFor(a) {
    ================================================================== */
 
 function openDetail(appId) {
-  if (state.selected !== appId) state.expanded.clear();
+  if (state.selected !== appId) {
+    state.expanded.clear();
+    state.ending = null;
+  }
   state.selected = appId;
   renderDetail();
   $("detail").dataset.open = "true";
@@ -484,7 +488,8 @@ function renderDetail() {
 
   $("detail-title").textContent = app.name;
   $("detail-sub").textContent =
-    app.windows[0] || `${KIND_LABEL[app.kind]} · ${app.process_count} processes`;
+    app.windows[0] ||
+    `${KIND_LABEL[app.kind]} · ${app.process_count} process${app.process_count === 1 ? "" : "es"}`;
 
   const over = app.totals.mem_rss - app.totals.mem_pss;
   const body = $("detail-body");
@@ -525,10 +530,141 @@ function renderDetail() {
   body.appendChild(spark);
   loadAppSpark(app.id);
 
+  renderActions(app, body);
+
   body.appendChild(html(`<div class="subhead">Processes</div>`));
   for (const root of app.roots) renderProc(root, body, 0);
 
   body.scrollTop = scroll;
+}
+
+/* Closing an application.
+ *
+ * Deliberately two steps with the consequence stated in between. The first
+ * press only arms it; the warning appears above the button that carries it
+ * out, not after. Nothing here force-kills on the first attempt: programs are
+ * asked to close so they can save, and forcing is offered separately, only
+ * once asking has visibly failed. */
+function renderActions(app, body) {
+  const targets = collectTargets(app.roots);
+  if (!targets.length) return;
+
+  const host = html(`<div class="actions"></div>`);
+  body.appendChild(host);
+
+  const ending = state.ending?.appId === app.id ? state.ending : null;
+
+  if (!ending) {
+    const button = html(
+      `<button class="danger">Close ${escapeHtml(app.name)}</button>`,
+    );
+    button.onclick = () => {
+      state.ending = { appId: app.id, stage: "confirm" };
+      renderDetail();
+    };
+    host.appendChild(button);
+    return;
+  }
+
+  const plural = targets.length === 1 ? "process" : `${targets.length} processes`;
+  const panel = html(`<div class="confirm"></div>`);
+  panel.appendChild(
+    html(`<div class="confirm-title">Close ${escapeHtml(app.name)}?</div>`),
+  );
+  panel.appendChild(
+    html(`<div>It will be asked to close its ${plural}. Anything unsaved is up to the program to handle.</div>`),
+  );
+  if (app.caution) {
+    panel.appendChild(html(`<div class="confirm-caution">${escapeHtml(app.caution)}</div>`));
+  }
+
+  if (ending.stage === "confirm" || ending.stage === "working") {
+    const row = html(`<div class="confirm-row"></div>`);
+    const go = html(
+      `<button class="danger" data-armed="true"${ending.stage === "working" ? " disabled" : ""}>${
+        ending.stage === "working" ? "Closing…" : "Close it"
+      }</button>`,
+    );
+    go.onclick = () => endApp(app, targets, false);
+    const cancel = html(`<button class="ghost">Cancel</button>`);
+    cancel.onclick = () => {
+      state.ending = null;
+      renderDetail();
+    };
+    row.append(go, cancel);
+    panel.appendChild(row);
+  }
+
+  if (ending.message) {
+    panel.appendChild(html(`<div class="confirm-result">${escapeHtml(ending.message)}</div>`));
+  }
+
+  if (ending.stage === "stubborn") {
+    const row = html(`<div class="confirm-row"></div>`);
+    const force = html(`<button class="danger" data-armed="true">Force it to stop</button>`);
+    force.onclick = () => endApp(app, targets, true);
+    const cancel = html(`<button class="ghost">Leave it</button>`);
+    cancel.onclick = () => {
+      state.ending = null;
+      renderDetail();
+    };
+    row.append(force, cancel);
+    panel.appendChild(row);
+  }
+
+  host.appendChild(panel);
+}
+
+function collectTargets(nodes, out = []) {
+  for (const n of nodes) {
+    out.push({ pid: n.pid, start_time: n.key.start_time });
+    collectTargets(n.children, out);
+  }
+  return out;
+}
+
+async function endApp(app, targets, force) {
+  state.ending = { appId: app.id, stage: "working" };
+  renderDetail();
+
+  const result = await invoke("terminate", { targets, force });
+  if (!result) {
+    state.ending = { appId: app.id, stage: "confirm", message: "Could not reach the backend." };
+    return renderDetail();
+  }
+
+  if (result.refused.length) {
+    state.ending = {
+      appId: app.id,
+      stage: "confirm",
+      message: `Refused: ${result.refused.join("; ")}`,
+    };
+    return renderDetail();
+  }
+
+  if (force) {
+    state.ending = null;
+    return renderDetail();
+  }
+
+  // Give it a moment to shut down on its own before suggesting anything
+  // heavier — most programs take a second or two to save and exit.
+  state.ending = { appId: app.id, stage: "working", message: "Asked it to close…" };
+  renderDetail();
+
+  await new Promise((r) => setTimeout(r, 2500));
+  const left = await invoke("still_running", { targets });
+  if (!left?.length) {
+    state.ending = null;
+    return renderDetail();
+  }
+
+  state.ending = {
+    appId: app.id,
+    stage: "stubborn",
+    message: `${left.length} ${left.length === 1 ? "process is" : "processes are"} still running. Forcing it means nothing gets saved.`,
+  };
+  renderDetail();
 }
 
 async function loadAppSpark(key) {
@@ -598,6 +734,18 @@ function renderProc(node, host, depth) {
 
   if (state.expanded.has(node.pid)) {
     el.appendChild(html(`<div class="proc-why">${escapeHtml(node.role.explanation)}</div>`));
+    if (node.role.kind !== "Kernel") {
+      const end = html(`<button class="proc-end">Close this process</button>`);
+      end.onclick = async (ev) => {
+        ev.stopPropagation();
+        end.disabled = true;
+        end.textContent = "Closing…";
+        const targets = [{ pid: node.pid, start_time: node.key.start_time }];
+        const r = await invoke("terminate", { targets, force: false });
+        end.textContent = r?.refused.length ? r.refused[0] : "Asked it to close";
+      };
+      el.appendChild(html(`<div style="margin-top:var(--s-2)"></div>`)).appendChild(end);
+    }
     const cmd = state.cmdlines.get(node.pid);
     if (cmd?.length) {
       el.appendChild(html(`<div class="proc-cmd">${escapeHtml(cmd.join(" ").slice(0, 400))}</div>`));
@@ -643,16 +791,17 @@ async function loadHistory() {
     // Nothing to fetch: the live view is the buffer this page has been
     // filling from the stream.
     state.history = [];
-    state.spikes = { cpu: [], memory: [], gpu: [], network: [] };
+    state.spikes = { cpu: [], memory: [], gpu: [], network: [], disk: [] };
     renderPerf();
     return;
   }
-  const [rows, cpu, memory, gpu, network] = await Promise.all([
+  const [rows, cpu, memory, gpu, network, disk] = await Promise.all([
     invoke("system_history", { spanSecs: state.span }),
     invoke("spikes", { spanSecs: state.span, metric: "cpu" }),
     invoke("spikes", { spanSecs: state.span, metric: "memory" }),
     invoke("spikes", { spanSecs: state.span, metric: "gpu" }),
     invoke("spikes", { spanSecs: state.span, metric: "network" }),
+    invoke("spikes", { spanSecs: state.span, metric: "disk" }),
   ]);
   state.history = rows || [];
   state.spikes = {
@@ -660,6 +809,7 @@ async function loadHistory() {
     memory: memory || [],
     gpu: gpu || [],
     network: network || [],
+    disk: disk || [],
   };
   renderPerf();
 }
@@ -851,6 +1001,46 @@ function renderPerf() {
     format: (v) => rateText(v),
     appFormat: (v) => `${rateText(v)} over TCP`,
     note: "Per-app figures count TCP only — UDP, and so most modern browser traffic, keeps no per-socket counter. The graph above counts everything, so it reads higher.",
+  });
+
+  // ---- Disk -----------------------------------------------------------
+  const diskSpikes = live
+    ? liveSpikes(rows, (p) => p.rdKb + p.wrKb, (p) => p.diskApp, (p) => p.diskAppKb)
+    : state.spikes.disk;
+  const busiest = state.model?.disks?.reduce((a, d) => Math.max(a, d.busy), 0) ?? 0;
+  $("disk-note").textContent = state.model?.disks?.length
+    ? `${state.model.disks.map((d) => d.name).join(", ")} — ${Math.round(busiest * 100)}% of the time with work in flight`
+    : "";
+  drawChart($("chart-disk"), {
+    series: [
+      {
+        name: "Read",
+        color: cssVar("--cat-1"),
+        points: at((r) => [r.t, r.rdKb], (r) => [r.t, r.disk_rd_kbps]),
+      },
+      {
+        name: "Write",
+        color: cssVar("--cat-2"),
+        points: at((r) => [r.t, r.wrKb], (r) => [r.t, r.disk_wr_kbps]),
+      },
+    ],
+    yFormat: (v, max) =>
+      (max ?? v) >= 1024 ? `${(v / 1024).toFixed(1)} MB/s` : `${Math.round(v)} KB/s`,
+    height: 168,
+    yMin: 64,
+    empty,
+    markers: markersFor(diskSpikes, (s) => s.value),
+  });
+  fillLegend($("disk-legend"), [
+    { name: "Read", color: cssVar("--cat-1") },
+    { name: "Write", color: cssVar("--cat-2") },
+  ]);
+  renderSpikes($("spikes-disk"), diskSpikes, {
+    live,
+    heading: "Heaviest moments",
+    format: (v) => rateText(v),
+    appFormat: (v) => `${rateText(v)} through the kernel`,
+    note: "Per-app figures are what each program asked the kernel for. The graph above is what the drive actually did, so cached reads appear in one and not the other.",
   });
 
   // ---- Pressure -------------------------------------------------------
@@ -1226,6 +1416,11 @@ function recordLive(model) {
   const byNet = [...model.apps].sort(
     (a, b) => b.totals.net_rx_bps + b.totals.net_tx_bps - (a.totals.net_rx_bps + a.totals.net_tx_bps),
   )[0];
+  const byDisk = [...model.apps].sort(
+    (a, b) =>
+      b.totals.disk_read_bps + b.totals.disk_write_bps -
+      (a.totals.disk_read_bps + a.totals.disk_write_bps),
+  )[0];
   const integrated = model.gpus.find((g) => g.busy_from_clients);
 
   state.live.push({
@@ -1235,6 +1430,13 @@ function recordLive(model) {
     gpu: (integrated?.busy ?? 0) * 100,
     rxKb: model.interfaces.reduce((a, i) => a + i.rx_bps, 0) / 1024,
     txKb: model.interfaces.reduce((a, i) => a + i.tx_bps, 0) / 1024,
+    rdKb: model.disks.reduce((a, d) => a + d.read_bps, 0) / 1024,
+    wrKb: model.disks.reduce((a, d) => a + d.write_bps, 0) / 1024,
+    diskBusy: model.disks.reduce((a, d) => Math.max(a, d.busy), 0) * 100,
+    diskApp: byDisk ? byDisk.name : null,
+    diskAppKb: byDisk
+      ? (byDisk.totals.disk_read_bps + byDisk.totals.disk_write_bps) / 1024
+      : 0,
     psi: [
       model.pressure.cpu?.some.avg10 ?? 0,
       model.pressure.memory?.some.avg10 ?? 0,

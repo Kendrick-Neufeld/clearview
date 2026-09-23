@@ -121,6 +121,7 @@ async fn spikes(
             btm_store::Metric::Memory => p.mem_mb,
             btm_store::Metric::Gpu => p.gpu_pm as u32,
             btm_store::Metric::Network => p.net_rx_kbps + p.net_tx_kbps,
+            btm_store::Metric::Disk => p.disk_rd_kbps + p.disk_wr_kbps,
         }
     };
 
@@ -285,6 +286,60 @@ fn with_history<T>(
     query(store, now).unwrap_or_default()
 }
 
+/// One process to signal, addressed by identity rather than by number alone.
+#[derive(serde::Deserialize)]
+struct Target {
+    pid: i32,
+    start_time: u64,
+}
+
+#[derive(serde::Serialize, Default)]
+struct TerminationResult {
+    /// How many were asked to close.
+    requested: usize,
+    /// How many actually received the signal.
+    signalled: usize,
+    /// How many had already exited — not a failure, and not reported as one.
+    already_gone: usize,
+    /// Human-readable reasons, one per genuine failure.
+    refused: Vec<String>,
+}
+
+/// Asks processes to close, or forces them to.
+///
+/// Every target is addressed by pid *and* start time. Pids are reused, and
+/// between the interface drawing a row and someone clicking it the process can
+/// exit and its number be handed to something else — so this is the difference
+/// between closing what was asked for and killing a bystander. The check lives
+/// in `btm_probe::control`, immediately before the signal.
+#[tauri::command]
+async fn terminate(targets: Vec<Target>, force: bool) -> Result<TerminationResult, ()> {
+    use btm_probe::control::{Signal, SignalError, send_signal};
+
+    let signal = if force { Signal::Force } else { Signal::Terminate };
+    let mut out = TerminationResult { requested: targets.len(), ..Default::default() };
+
+    for t in targets {
+        match send_signal(t.pid, t.start_time, signal) {
+            Ok(()) => out.signalled += 1,
+            Err(SignalError::Vanished) => out.already_gone += 1,
+            Err(e) => out.refused.push(format!("pid {}: {e}", t.pid)),
+        }
+    }
+    Ok(out)
+}
+
+/// Which of these are still running, so the interface can tell whether asking
+/// politely worked before offering to force the issue.
+#[tauri::command]
+async fn still_running(targets: Vec<Target>) -> Result<Vec<i32>, ()> {
+    Ok(targets
+        .into_iter()
+        .filter(|t| btm_probe::control::still_running(t.pid, t.start_time))
+        .map(|t| t.pid)
+        .collect())
+}
+
 /// Static facts the interface needs to state its units honestly.
 #[tauri::command]
 async fn machine_info() -> serde_json::Value {
@@ -310,7 +365,9 @@ fn main() {
             system_history,
             app_history,
             history_status,
-            spikes
+            spikes,
+            terminate,
+            still_running
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
