@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "btm-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "btm-model",
  "btm-probe",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "btm-collector"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "btm-model",
  "btm-probe",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "btm-model"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "btm-probe",
  "serde",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "btm-probe"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "serde",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "btm-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rusqlite",
  "serde",
