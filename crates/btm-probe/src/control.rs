@@ -48,6 +48,44 @@ impl std::fmt::Display for SignalError {
     }
 }
 
+/// Compositors and display servers. Ending one of these does not close a
+/// program; it ends the graphical session, taking every window with it and
+/// usually requiring a reboot to recover from.
+///
+/// Xwayland is deliberately absent: it can be killed and restarted, and doing
+/// so is sometimes useful. These cannot.
+const COMPOSITORS: [&str; 14] = [
+    "Hyprland", "niri", "sway", "river", "weston", "labwc", "wayfire",
+    "kwin_wayland", "kwin_x11", "mutter", "gnome-shell", "plasmashell",
+    "cosmic-comp", "Xorg",
+];
+
+/// Whether `pid` is an ancestor of this very process.
+///
+/// Signalling an ancestor kills whatever started us, and usually us with it.
+/// This is the general form of the problem: it catches the compositor, the
+/// login session, the user's systemd instance and the terminal, without
+/// needing to recognise any of them by name.
+fn is_ancestor_of_self(pid: i32) -> bool {
+    let mut current = std::process::id() as i32;
+    for _ in 0..64 {
+        let Some(stat) = process::read_stat(current) else { return false };
+        if stat.ppid == pid {
+            return true;
+        }
+        if stat.ppid <= 1 {
+            return false;
+        }
+        current = stat.ppid;
+    }
+    false
+}
+
+/// Whether this process is the compositor running the desktop.
+fn is_compositor(comm: &str) -> bool {
+    COMPOSITORS.iter().any(|c| c.eq_ignore_ascii_case(comm))
+}
+
 /// Sends a signal, but only if the pid still refers to the same process.
 ///
 /// Pids are reused. Between the moment a list is drawn and the moment someone
@@ -79,6 +117,26 @@ pub fn send_signal(
         ));
     }
 
+    // Two refusals that exist because getting this wrong ends a session rather
+    // than a program. A compositor grouped together with the apps it launched —
+    // which is what happens when it runs as a systemd service, since everything
+    // it starts inherits its cgroup — would otherwise be swept up in "close
+    // this app" and take the desktop down with it.
+    if is_compositor(&stat.comm) {
+        return Err(SignalError::Refused(format!(
+            "{} is the compositor running your desktop — closing it would end your \
+             session and every window in it, so it is left alone",
+            stat.comm
+        )));
+    }
+    if is_ancestor_of_self(pid) {
+        return Err(SignalError::Refused(format!(
+            "{} started the session this monitor is running in — closing it would \
+             take the whole session down, so it is left alone",
+            stat.comm
+        )));
+    }
+
     // SAFETY: `kill` with a valid signal number is always safe to call; the
     // only question is whether it is permitted, which the return value answers.
     let result = unsafe { libc::kill(pid, signal.as_raw()) };
@@ -101,6 +159,63 @@ pub fn still_running(pid: i32, expected_start_time: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compositor_is_never_signalled() {
+        for name in ["niri", "Hyprland", "sway", "gnome-shell", "Xorg", "NIRI"] {
+            assert!(is_compositor(name), "{name} must be protected");
+        }
+        // Xwayland can be restarted, so it stays killable.
+        assert!(!is_compositor("Xwayland"));
+        assert!(!is_compositor("firefox"));
+    }
+
+    /// The general guard: anything this process descends from would take us,
+    /// and usually the session, with it.
+    #[test]
+    fn an_ancestor_of_this_process_is_never_signalled() {
+        let parent = process::read_stat(std::process::id() as i32).unwrap().ppid;
+        assert!(is_ancestor_of_self(parent), "our own parent must be recognised");
+
+        let start = process::read_stat(parent).unwrap().start_time;
+        assert!(
+            matches!(send_signal(parent, start, Signal::Terminate), Err(SignalError::Refused(_))),
+            "signalling our own parent must be refused"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_process_is_not_mistaken_for_an_ancestor() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert!(!is_ancestor_of_self(pid), "our own child is not our ancestor");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The guard exercised against whatever compositor is actually running,
+    /// rather than only against the name list. Skips where there is no
+    /// graphical session, so it stays honest on a headless machine.
+    #[test]
+    fn the_running_compositor_is_refused_in_practice() {
+        let running = crate::process::list_pids().into_iter().find_map(|pid| {
+            let stat = crate::process::read_stat(pid)?;
+            is_compositor(&stat.comm).then_some(stat)
+        });
+        let Some(stat) = running else {
+            eprintln!("no compositor running; nothing to check");
+            return;
+        };
+        assert!(
+            matches!(
+                send_signal(stat.pid, stat.start_time, Signal::Terminate),
+                Err(SignalError::Refused(_))
+            ),
+            "{} (pid {}) was not refused",
+            stat.comm,
+            stat.pid
+        );
+    }
 
     #[test]
     fn init_is_never_signalled() {

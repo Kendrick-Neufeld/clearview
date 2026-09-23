@@ -1461,6 +1461,7 @@ function recordLive(model) {
 function apply(model) {
   state.model = model;
   recordLive(model);
+  noteWindowSource(model);
   renderSummary(model);
   // Drawing a hidden view is wasted work, and the treemap in particular
   // measures a zero-width container and lays out nothing.
@@ -1481,6 +1482,20 @@ function wireErrorReporting() {
     fail(`${e.message} — ${String(e.filename).split("/").pop()}:${e.lineno}`));
   window.addEventListener("unhandledrejection", (e) =>
     fail(`Unhandled: ${e.reason?.message || e.reason}`));
+}
+
+/* Without window information, an application cannot be told from a background
+   process, and a program the compositor launched can end up grouped with the
+   compositor. Everything still works — but silently working differently is how
+   a confusing list gets mistaken for a bug in the grouping. */
+function noteWindowSource(model) {
+  if (model.window_source || state.warnedNoWindows) return;
+  state.warnedNoWindows = true;
+  fail(
+    "No compositor could be queried for window information, so applications " +
+    "cannot be separated from background processes and may be grouped with " +
+    "whatever launched them. Hyprland and niri are supported.",
+  );
 }
 
 function wire() {

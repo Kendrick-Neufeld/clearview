@@ -149,6 +149,14 @@ pub struct SystemModel {
     pub gpus: Vec<btm_probe::gpu::GpuInfo>,
     pub interfaces: Vec<btm_probe::sampler::InterfaceRate>,
     pub disks: Vec<btm_probe::sampler::DiskRate>,
+    /// Which compositor answered the window query, if any.
+    ///
+    /// `None` means no window could be attributed to any process. Everything
+    /// still works, but applications cannot be told apart from background
+    /// processes, and a program started by the compositor may be grouped with
+    /// it. That is worth saying out loud rather than leaving to be inferred
+    /// from a strange-looking list.
+    pub window_source: Option<String>,
 }
 
 impl SystemModel {
@@ -196,6 +204,7 @@ impl SystemModel {
             gpus: sample.gpus.clone(),
             interfaces: sample.interfaces.clone(),
             disks: sample.disks.clone(),
+            window_source: btm_probe::wm::source().map(str::to_string),
         }
     }
 

@@ -23,10 +23,27 @@ pub struct Window {
 
 /// Every mapped window, or an empty list under a compositor we cannot query.
 ///
-/// Window information is a bonus, never a requirement: the tool has to work the same
-/// on a compositor with no IPC at all.
+/// Window information is never strictly required, but losing it is not
+/// harmless: which process owns a window is what separates an application from
+/// a background process, and what stops a program launched by the compositor
+/// from being filed under the compositor. Under a compositor this cannot
+/// query, everything falls back to weaker signals — so supporting more of them
+/// matters more than it looks.
 pub fn windows() -> Vec<Window> {
-    hyprland_windows().unwrap_or_default()
+    hyprland_windows()
+        .or_else(niri_windows)
+        .unwrap_or_default()
+}
+
+/// Which compositor answered, for the interface to report when none did.
+pub fn source() -> Option<&'static str> {
+    if hyprland_socket().is_some() {
+        Some("Hyprland")
+    } else if niri_socket().is_some() {
+        Some("niri")
+    } else {
+        None
+    }
 }
 
 /// The directory the compositor keeps its sockets in.
@@ -134,7 +151,76 @@ fn active_window_address() -> Option<String> {
 }
 
 /// Whether window information is obtainable at all. The interface can say so
-/// rather than presenting every application as a background process.
+/// rather than silently presenting every application as a background process.
 pub fn available() -> bool {
-    hyprland_socket().is_some()
+    source().is_some()
+}
+
+/// Finds niri's control socket.
+///
+/// `NIRI_SOCKET` names it directly for processes niri started. As with
+/// Hyprland, that variable is absent from a trimmed environment, so the
+/// runtime directory is searched as well.
+fn niri_socket() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("NIRI_SOCKET") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let runtime = runtime_dir()?;
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&runtime)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            // niri names its socket `niri.<wayland display>.<pid>.sock`.
+            if !name.starts_with("niri") || !name.ends_with(".sock") {
+                return None;
+            }
+            let when = entry.metadata().and_then(|m| m.modified()).ok()?;
+            Some((when, entry.path()))
+        })
+        .collect();
+
+    candidates.sort_by_key(|(when, _)| *when);
+    candidates.pop().map(|(_, socket)| socket)
+}
+
+/// Queries niri over its control socket.
+///
+/// niri speaks newline-delimited JSON: one request per line, one reply per
+/// line. The reply is `{"Ok": {"Windows": [...]}}`.
+fn niri_windows() -> Option<Vec<Window>> {
+    let mut stream = UnixStream::connect(niri_socket()?).ok()?;
+    stream.write_all(b"\"Windows\"\n").ok()?;
+    stream.flush().ok()?;
+
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).ok()?;
+
+    let reply: serde_json::Value = serde_json::from_str(buf.lines().next()?).ok()?;
+    let list = reply.get("Ok")?.get("Windows")?.as_array()?;
+
+    Some(
+        list.iter()
+            .filter_map(|w| {
+                // Older niri builds do not report a pid; without one a window
+                // cannot be attributed, so it is skipped rather than guessed at.
+                let pid = w.get("pid")?.as_i64()? as i32;
+                if pid <= 0 {
+                    return None;
+                }
+                Some(Window {
+                    pid,
+                    class: w.get("app_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    title: w.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    workspace: w.get("workspace_id").map(|v| v.to_string()),
+                    focused: w.get("is_focused").and_then(|v| v.as_bool()).unwrap_or(false),
+                })
+            })
+            .collect(),
+    )
 }
